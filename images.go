@@ -22,13 +22,13 @@ import (
 	"fmt"
 	"strings"
 	"text/tabwriter"
-
 	"github.com/containerd/containerd/content"
 	"github.com/containerd/containerd/images"
-	"github.com/containerd/containerd/pkg/progress"
 	"github.com/containerd/containerd/platforms"
+	"github.com/containerd/containerd/pkg/progress"
 	"github.com/pkg/errors"
 	"github.com/urfave/cli/v2"
+	snapshots "github.com/containerd/containerd/snapshots"
 )
 
 var imagesCommand = &cli.Command{
@@ -80,11 +80,28 @@ func printImages(ctx context.Context, clicontext *cli.Context, imageList []image
 	}
 
 	for _, img := range imageList {
-		size, err := img.Size(ctx, cs, platforms.Default())
-		if err != nil {
-			return errors.Wrap(err, "failed to compute image size")
+	    size, _ := img.Size(ctx, cs, platforms.Default())
+	    client, _, _, _ := newClient(clicontext)
+	    sn := client.SnapshotService(clicontext.String("snapshotter"))
+	    //fmt.Println(sn.Stat(ctx,img.Target.Digest.String()))
+	    //imageService := client.ImageService()
+        //image, err := imageService.Get(ctx, img.N)
+	    //img.Usage(ctx, WithUsageManifestLimit(0), WithManifestUsage())
+	    //fmt.Println(img.Target)
+	    activeSnapshotSize, _ := sn.Usage(ctx,img.Target.Digest.String())
+		walkFn := func(ctx context.Context, info snapshots.Info) error {
+		        fmt.Println(info.Parent)
+		        parentSize, err := sn.Usage(ctx,info.Parent)
+		        if err != nil {
+                	return errors.Wrap(err, "failed to compute image size")
+                }
+                activeSnapshotSize.Add(parentSize)
+                fmt.Println(parentSize)
+				return nil
 		}
 
+	    sn.Walk(ctx, walkFn)
+        //fmt.Println(progress.Bytes(activeSnapshotSize.Size))
 		var repository, tag string
 
 		repositoryTag := strings.Split(img.Name, ":")
