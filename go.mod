@@ -4,6 +4,7 @@ go 1.16
 
 require (
 	github.com/Microsoft/go-winio v0.5.1
+	github.com/Microsoft/hcsshim v0.8.21
 	github.com/compose-spec/compose-go v1.0.4
 	github.com/containerd/cgroups v1.0.2
 	github.com/containerd/console v1.0.3
@@ -23,6 +24,7 @@ require (
 	github.com/docker/docker v20.10.10+incompatible
 	github.com/docker/go-connections v0.4.0
 	github.com/docker/go-units v0.4.0
+	github.com/docker/libtrust v0.0.0-20160708172513-aabc10ec26b7 // indirect
 	github.com/fatih/color v1.13.0
 	github.com/gogo/protobuf v1.3.2
 	github.com/mattn/go-isatty v0.0.14
@@ -35,8 +37,10 @@ require (
 	github.com/sirupsen/logrus v1.8.1
 	github.com/spf13/cobra v1.2.1 // replaced, see the bottom of this file
 	github.com/spf13/pflag v1.0.5 // replaced, see the bottom of this file
+	github.com/stretchr/objx v0.2.0 // indirect
 	github.com/tidwall/gjson v1.11.0
 	golang.org/x/crypto v0.0.0-20210921155107-089bfa567519
+	golang.org/x/net v0.0.0-20210805182204-aaa1db679c0d // indirect
 	golang.org/x/sync v0.0.0-20210220032951-036812b2e83c
 	golang.org/x/sys v0.0.0-20211004093028-2c5d950f24ef
 	golang.org/x/term v0.0.0-20210927222741-03fcf44c2211
