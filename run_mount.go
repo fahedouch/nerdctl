@@ -22,7 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-
+    "fmt"
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/mount"
@@ -37,6 +37,7 @@ import (
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 	"github.com/urfave/cli/v2"
+	"github.com/containerd/containerd/pkg/progress"
 )
 
 func generateMountOpts(clicontext *cli.Context, ctx context.Context, client *containerd.Client, ensuredImage *imgutil.EnsuredImage) ([]oci.SpecOpts, []string, error) {
@@ -68,6 +69,10 @@ func generateMountOpts(clicontext *cli.Context, ctx context.Context, client *con
 		chainID := identity.ChainID(diffIDs).String()
 
 		s := client.SnapshotService(clicontext.String("snapshotter"))
+        usage1, _ := s.Usage(ctx, chainID)
+        totalSize := usage1.Size
+        fmt.Println(progress.Bytes(totalSize))
+        fmt.Println(chainID)
 		tempDir, err = ioutil.TempDir("", "initialC")
 		if err != nil {
 			return nil, nil, err
