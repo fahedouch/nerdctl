@@ -67,12 +67,20 @@ func generateMountOpts(clicontext *cli.Context, ctx context.Context, client *con
 			return nil, nil, err
 		}
 		chainID := identity.ChainID(diffIDs).String()
-
+        fmt.Println(chainID)
 		s := client.SnapshotService(clicontext.String("snapshotter"))
         usage1, _ := s.Usage(ctx, chainID)
         totalSize := usage1.Size
         fmt.Println(progress.Bytes(totalSize))
-        fmt.Println(chainID)
+		/*if err := s.Walk(ctx, func(ctx context.Context, info snapshots.Info) error {
+			fmt.Println(
+				info.Name,
+				info.Parent,
+				info.Kind)
+			return nil
+		}); err != nil {
+			return nil, nil, err
+		}*/
 		tempDir, err = ioutil.TempDir("", "initialC")
 		if err != nil {
 			return nil, nil, err
