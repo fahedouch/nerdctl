@@ -128,6 +128,9 @@ jobs:
       run: |
         vagrant up
         vagrant ssh-config >> ~/.ssh/config
+    - name: "Get faster C"
+      run: |
+        ssh default -- ./script
     - name: "Run tests"
       # TODO: enable -test.kill-daemon, after Fedora updates containerd to a recent version (Mar 2021)
       run: ssh default -- "sudo /vagrant/nerdctl.test -test.v"
