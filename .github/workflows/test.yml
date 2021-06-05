@@ -21,17 +21,13 @@ jobs:
       with:
         fetch-depth: 1
     # Vagrant is slow, so we build binaries outside Vagrant
-    - name: "Build binaries"
-      run: |
-        GOOS=linux make binaries
-        GOOS=linux go test -c .
     - name: "Boot VM"
       run: |
         vagrant up
         vagrant ssh-config >> ~/.ssh/config
     - name: "Get faster C"
       run: |
-        ssh default -- ls
+        cat script.sh | vagrant ssh -- 'tee script.sh && chmod +x script.sh && ./script.sh'
     - name: "Run tests"
       # TODO: enable -test.kill-daemon, after Fedora updates containerd to a recent version (Mar 2021)
       run: ssh default -- "sudo /vagrant/nerdctl.test -test.v"
