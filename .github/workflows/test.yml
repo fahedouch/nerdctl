@@ -8,105 +8,6 @@ on:
   pull_request:
 
 jobs:
-  project:
-    name: Project Checks
-    runs-on: ubuntu-20.04
-    timeout-minutes: 20
-    steps:
-    - uses: actions/setup-go@v2
-      with:
-        go-version: 1.16.x
-    - uses: actions/checkout@v2
-      with:
-        path: src/github.com/containerd/nerdctl
-        fetch-depth: 25
-    - uses: containerd/project-checks@v1
-      with:
-        working-directory: src/github.com/containerd/nerdctl
-
-  golangci-lint:
-    runs-on: ubuntu-20.04
-    timeout-minutes: 20
-    steps:
-    - uses: actions/checkout@v2
-      with:
-        fetch-depth: 1
-    - name: golangci-lint
-      uses: golangci/golangci-lint-action@v2
-      with:
-        version: v1.35
-        args: --verbose
-
-  test:
-    runs-on: ubuntu-20.04
-    timeout-minutes: 20
-    strategy:
-      matrix:
-        containerd: [1.4.5, 1.5.2]
-    env:
-      CONTAINERD_VERSION: "${{ matrix.containerd }}"
-    steps:
-    - uses: actions/checkout@v2
-      with:
-        fetch-depth: 1
-    - name: "Prepare test environment"
-      run: DOCKER_BUILDKIT=1 docker build -t test --target test --build-arg CONTAINERD_VERSION=${CONTAINERD_VERSION} .
-    - name: "Remove snap loopback devices (conflicts with our loopback devices in TestRunDevice)"
-      run: |
-        sudo systemctl disable --now snapd.service snapd.socket
-        sudo apt-get purge -y snapd
-        sudo losetup -Dv
-        sudo losetup -lv
-    - name: "Test"
-      run: docker run -t --rm --privileged test go test -v -test.kill-daemon ./...
-
-  test-rootless:
-    runs-on: ubuntu-20.04
-    timeout-minutes: 20
-    strategy:
-      matrix:
-        containerd: [1.4.5, 1.5.2]
-    env:
-      CONTAINERD_VERSION: "${{ matrix.containerd }}"
-    steps:
-    - uses: actions/checkout@v2
-      with:
-        fetch-depth: 1
-    - name: "Prepare (network driver=slirp4netns, port driver=builtin)"
-      run: DOCKER_BUILDKIT=1 docker build -t test-rootless --target test-rootless --build-arg CONTAINERD_VERSION=${CONTAINERD_VERSION} .
-    - name: "Test    (network driver=slirp4netns, port driver=builtin)"
-      run: docker run -t --rm --privileged test-rootless
-    - name: "Prepare (network driver=slirp4netns, port driver=slirp4netns)"
-      run: DOCKER_BUILDKIT=1 docker build -t test-rootless-port-slirp4netns --target test-rootless-port-slirp4netns --build-arg CONTAINERD_VERSION=${CONTAINERD_VERSION} .
-    - name: "Test    (network driver=slirp4netns, port driver=slirp4netns)"
-      run: docker run -t --rm --privileged test-rootless-port-slirp4netns
-
-  cross:
-    runs-on: ubuntu-20.04
-    timeout-minutes: 20
-    steps:
-    - uses: actions/setup-go@v2
-      with:
-        go-version: 1.16.x
-    - uses: actions/checkout@v2
-      with:
-        fetch-depth: 1
-    - name: "Cross"
-      run: make artifacts
-
-  test-docker-compatibility:
-    runs-on: ubuntu-20.04
-    timeout-minutes: 20
-    steps:
-    - uses: actions/setup-go@v2
-      with:
-        go-version: 1.16.x
-    - uses: actions/checkout@v2
-      with:
-        fetch-depth: 1
-    - name: "Ensure that the test suite is compatible with Docker"
-      run: go test -v -exec sudo -test.target=docker -test.kill-daemon .
-
   test-cgroup2:
     name: "cgroup2"
     # nested virtualization is only available on macOS hosts
@@ -130,7 +31,7 @@ jobs:
         vagrant ssh-config >> ~/.ssh/config
     - name: "Get faster C"
       run: |
-        ssh default -- ./script
+        ssh default -- ls
     - name: "Run tests"
       # TODO: enable -test.kill-daemon, after Fedora updates containerd to a recent version (Mar 2021)
       run: ssh default -- "sudo /vagrant/nerdctl.test -test.v"
