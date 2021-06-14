@@ -45,6 +45,9 @@ func (c *Composer) upVolume(ctx context.Context, shortName string) error {
 		return err
 	} else if !volExists {
 		logrus.Infof("Creating volume %s", fullName)
+		if err := c.runNerdctlCmd(ctx, append([]string{"volume","create", fullName},)...); err != nil {
+			return err
+		}
 		if err := c.runNerdctlCmd(ctx, "volume", "create", fullName); err != nil {
 			return err
 		}
