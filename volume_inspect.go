@@ -48,6 +48,7 @@ func volumeInspectAction(clicontext *cli.Context) error {
 		if err != nil {
 			return err
 		}
+		fmt.Println(vol)
 		result[i] = vol
 	}
 	b, err := json.MarshalIndent(result, "", "    ")

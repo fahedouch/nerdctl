@@ -29,6 +29,12 @@ var volumeCreateCommand = &cli.Command{
 	Usage:     "Create a volume",
 	ArgsUsage: "[flags] VOLUME",
 	Action:    volumeCreateAction,
+	Flags: []cli.Flag{
+		&cli.StringSliceFlag{
+    		Name:    "label",
+    		Usage:   "Set metadata for a volume",
+    	},
+	},
 }
 
 func volumeCreateAction(clicontext *cli.Context) error {
