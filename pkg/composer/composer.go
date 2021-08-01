@@ -27,13 +27,18 @@ import (
 	"github.com/containerd/containerd/identifiers"
 	"github.com/containerd/nerdctl/pkg/composer/projectloader"
 	"github.com/containerd/nerdctl/pkg/reflectutil"
+	"github.com/joho/godotenv"
 	"github.com/pkg/errors"
 	"github.com/sirupsen/logrus"
 )
 
 type Options struct {
+	//TODO Specifying multiple Compose files
 	File           string // empty for default
 	Project        string // empty for default
+	EnvFile        string
+	Environment    map[string]string
+	WorkingDir     string
 	NerdctlCmd     string
 	NerdctlArgs    []string
 	NetworkExists  func(string) (bool, error)
@@ -53,10 +58,14 @@ func New(o Options) (*Composer, error) {
 
 	var err error
 	if o.File == "" {
-		o.File, err = findComposeYAML()
+		o.File, err = findComposeYAML(&o)
 		if err != nil {
 			return nil, err
 		}
+	}
+
+	if err := setDotEnv(&o); err != nil {
+		return nil, err
 	}
 
 	o.File, err = filepath.Abs(o.File)
@@ -72,7 +81,7 @@ func New(o Options) (*Composer, error) {
 		return nil, errors.Wrapf(err, "got invalid project name %q", o.Project)
 	}
 
-	project, err := projectloader.Load(o.File, o.Project)
+	project, err := projectloader.Load(o.File, o.Project, o.Environment)
 	if err != nil {
 		return nil, err
 	}
@@ -86,6 +95,7 @@ func New(o Options) (*Composer, error) {
 	if unknown := reflectutil.UnknownNonEmptyFields(project,
 		"Name",
 		"WorkingDir",
+		"Environment",
 		"Services",
 		"Networks",
 		"Volumes",
@@ -123,18 +133,88 @@ func (c *Composer) runNerdctlCmd(ctx context.Context, args ...string) error {
 	return nil
 }
 
-func findComposeYAML() (string, error) {
-	yamlNames := []string{"docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"}
-	for _, candidate := range yamlNames {
-		fullPath, err := filepath.Abs(candidate)
+//find compose Yaml file in current directory and its parents
+func findComposeYAML(o *Options) (string, error) {
+	pwd, err := o.GetWorkingDir()
+	if err != nil {
+		return "", err
+	}
+	for {
+		yamlNames := []string{"docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"}
+		for _, candidate := range yamlNames {
+			f := filepath.Join(pwd, candidate)
+			if _, err := os.Stat(f); err == nil {
+				return f, nil
+			} else if !os.IsNotExist(err) {
+				return "", err
+			}
+		}
+		parent := filepath.Dir(pwd)
+		if parent == pwd {
+			return "", errors.Errorf("cannot find a compose YAML, supported file names: %+v in this directory or any parent", yamlNames)
+		}
+		pwd = parent
+	}
+}
+
+// setDotEnv was inspired from https://github.com/compose-spec/compose-go/blob/de56f4f0cb3c925f41df594221148613534c2cd3/cli/options.go#L174-215
+// setDotEnv imports environment variables from .env file
+func setDotEnv(o *Options) error {
+	dotEnvFile := o.EnvFile
+	if dotEnvFile == "" {
+		wd, err := o.GetWorkingDir()
+		if err != nil {
+			return err
+		}
+		dotEnvFile = filepath.Join(wd, ".env")
+	}
+	abs, err := filepath.Abs(dotEnvFile)
+	if err != nil {
+		return err
+	}
+	dotEnvFile = abs
+	s, err := os.Stat(dotEnvFile)
+	if os.IsNotExist(err) {
+		if o.EnvFile != "" {
+			return err
+		}
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	if s.IsDir() {
+		return errors.Errorf("%s is not a file", dotEnvFile)
+	}
+
+	file, err := os.Open(dotEnvFile)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+
+	env, err := godotenv.Parse(file)
+	if err != nil {
+		return err
+	}
+	for k, v := range env {
+		o.Environment[k] = v
+	}
+	return nil
+}
+
+func (o Options) GetWorkingDir() (string, error) {
+	if o.WorkingDir != "" {
+		return o.WorkingDir, nil
+	}
+	// reading the configuration from stdin
+	if o.File != "-" {
+		absPath, err := filepath.Abs(o.File)
 		if err != nil {
 			return "", err
 		}
-		if _, err := os.Stat(fullPath); err == nil {
-			return fullPath, nil
-		} else if !os.IsNotExist(err) {
-			return "", err
-		}
+		return filepath.Dir(absPath), nil
 	}
-	return "", errors.Errorf("cannot find a compose YAML, supported file names: %+v", yamlNames)
+	return os.Getwd()
 }

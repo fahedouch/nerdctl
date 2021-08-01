@@ -46,9 +46,17 @@ var composeCommand = &cli.Command{
 			Usage:   "Specify an alternate compose file",
 		},
 		&cli.StringFlag{
+			Name:  "project-directory",
+			Usage: "Specify an alternate working directory",
+		},
+		&cli.StringFlag{
 			Name:    "project-name",
 			Aliases: []string{"p"},
 			Usage:   "Specify an alternate project name",
+		},
+		&cli.StringFlag{
+			Name:  "env-file",
+			Usage: "Specify an alternate environment file",
 		},
 	},
 }
@@ -58,6 +66,9 @@ func getComposer(clicontext *cli.Context, client *containerd.Client) (*composer.
 	o := composer.Options{
 		File:           clicontext.String("file"),
 		Project:        clicontext.String("project-name"),
+		EnvFile:        clicontext.String("env-file"),
+		Environment:    map[string]string{},
+		WorkingDir:     clicontext.String("project-directory"),
 		NerdctlCmd:     nerdctlCmd,
 		NerdctlArgs:    nerdctlArgs,
 		DebugPrintFull: clicontext.Bool("debug-full"),
