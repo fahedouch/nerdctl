@@ -20,7 +20,7 @@ require (
 	github.com/containernetworking/plugins v1.0.1
 	github.com/cyphar/filepath-securejoin v0.2.3
 	github.com/docker/cli v20.10.11+incompatible
-	github.com/docker/docker v20.10.11+incompatible
+	github.com/docker/docker v20.10.12+incompatible
 	github.com/docker/go-connections v0.4.0
 	github.com/docker/go-units v0.4.0
 	github.com/fatih/color v1.13.0
