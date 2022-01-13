@@ -7,10 +7,10 @@ require (
 	github.com/compose-spec/compose-go v1.0.8
 	github.com/containerd/cgroups v1.0.2
 	github.com/containerd/console v1.0.3
-	github.com/containerd/containerd v1.6.0-beta.5
+	github.com/containerd/containerd v1.6.0-rc.0
 	github.com/containerd/containerd/api v1.6.0-beta.3
-	github.com/containerd/continuity v0.2.2-0.20211201162329-8e53e7cac79d
-	github.com/containerd/go-cni v1.1.1-0.20211215152955-2d9d28f46d8e
+	github.com/containerd/continuity v0.2.2
+	github.com/containerd/go-cni v1.1.1
 	github.com/containerd/imgcrypt v1.1.3
 	github.com/containerd/stargz-snapshotter v0.10.1
 	github.com/containerd/stargz-snapshotter/estargz v0.10.1
@@ -160,7 +160,7 @@ require (
 	go.opentelemetry.io/otel/trace v1.3.0 // indirect
 	go.uber.org/atomic v1.7.0 // indirect
 	go.uber.org/multierr v1.7.0 // indirect
-	go.uber.org/zap v1.17.0 // indirect
+	go.uber.org/zap v1.19.0 // indirect
 	golang.org/x/net v0.0.0-20211216030914-fe4d6282115f // indirect
 	golang.org/x/text v0.3.7 // indirect
 	golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1 // indirect
