@@ -143,6 +143,32 @@ func TestRunCIDFile(t *testing.T) {
 	base.Cmd("run", "--rm", "--cidfile", fileName, testutil.CommonImage).AssertFail()
 }
 
+func TestRunEnvFileWithAfero(t *testing.T){
+	t.Parallel()
+	base := testutil.NewBase(t)
+
+	tID := testutil.Identifier(t)
+	file1, err := os.CreateTemp("", tID)
+	assert.NilError(base.T, err)
+	path1 := file1.Name()
+	defer file1.Close()
+	defer os.Remove(path1)
+	err = os.WriteFile(path1, []byte("# this is a comment line\nTESTKEY1=TESTVAL1"), 0666)
+	assert.NilError(base.T, err)
+
+	file2, err := os.CreateTemp("", tID)
+	assert.NilError(base.T, err)
+	path2 := file2.Name()
+	defer file2.Close()
+	defer os.Remove(path2)
+	err = os.WriteFile(path2, []byte("# this is a comment line\nTESTKEY2=TESTVAL2"), 0666)
+	assert.NilError(base.T, err)
+
+	base.Cmd("run", "--rm", "--env-file", path1, "--env-file", path2, testutil.CommonImage, "sh", "-c", "echo -n $TESTKEY1").AssertOutExactly("TESTVAL1")
+	base.Cmd("run", "--rm", "--env-file", path1, "--env-file", path2, testutil.CommonImage, "sh", "-c", "echo -n $TESTKEY2").AssertOutExactly("TESTVAL2")
+}
+
+
 func TestRunEnvFile(t *testing.T) {
 	t.Parallel()
 	base := testutil.NewBase(t)
