@@ -26,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/containerd/nerdctl/pkg/testutil"
+	"github.com/spf13/afero"
 
 	"gotest.tools/v3/assert"
 )
@@ -143,11 +144,54 @@ func TestRunCIDFile(t *testing.T) {
 	base.Cmd("run", "--rm", "--cidfile", fileName, testutil.CommonImage).AssertFail()
 }
 
-func TestRunEnvFileWithAfero(t *testing.T){
-	t.Parallel()
-	base := testutil.NewBase(t)
+/****************************/
+/***** BenchMark Afero ******/
+/****************************/
 
-	tID := testutil.Identifier(t)
+func BenchmarkTestRunEnvFileWithAfero(b *testing.B) {
+	base := testutil.NewBaseBenchmark(b)
+
+    //init afero mem backend
+	memFS := afero.NewMemMapFs()
+    //afs := &afero.Afero{Fs: memFS}
+
+	tID := testutil.Identifier(b)
+	file1, err := afero.TempFile(memFS, "", tID)
+	assert.NilError(base.T, err)
+	path1 := file1.Name()
+
+	/* Useless test cleanup with memory backend */
+	//defer file1.Close()
+	//defer os.Remove(path1)
+
+	err = afero.WriteFile(memFS, path1, []byte("# this is a comment line\nTESTKEY1=TESTVAL1"), 0666)
+	assert.NilError(base.T, err)
+
+
+	memFS.MkdirAll("src/a", 0755)
+	afero.WriteFile(memFS, "src/a/b", []byte("# this is a comment line\nTESTKEY1=TESTVAL1"), 0644)
+
+
+	file2, err := afero.TempFile(memFS, "", tID)
+	assert.NilError(base.T, err)
+	path2 := file2.Name()
+    r, err := os.ReadFile("src/a/b")
+    b.Log(string(r))
+	/* Useless test cleanup with memory backend */
+	//defer file2.Close()
+	//defer os.Remove(path2)
+
+	err = afero.WriteFile(memFS, path2, []byte("# this is a comment line\nTESTKEY2=TESTVAL2"), 0666)
+	assert.NilError(base.T, err)
+
+	base.Cmd("run", "--rm", "--network", "none", "--env-file", path1, "--env-file", path2, testutil.CommonImage, "sh", "-c", "echo -n $TESTKEY1").AssertOutExactly("TESTVAL1")
+	base.Cmd("run", "--rm", "--network", "none", "--env-file", path1, "--env-file", path2, testutil.CommonImage, "sh", "-c", "echo -n $TESTKEY2").AssertOutExactly("TESTVAL2")
+}
+
+/*func BenchmarkTestRunEnvFile(b *testing.B) {
+	base := testutil.NewBaseBenchmark(b)
+
+	tID := testutil.Identifier(b)
 	file1, err := os.CreateTemp("", tID)
 	assert.NilError(base.T, err)
 	path1 := file1.Name()
@@ -166,8 +210,11 @@ func TestRunEnvFileWithAfero(t *testing.T){
 
 	base.Cmd("run", "--rm", "--env-file", path1, "--env-file", path2, testutil.CommonImage, "sh", "-c", "echo -n $TESTKEY1").AssertOutExactly("TESTVAL1")
 	base.Cmd("run", "--rm", "--env-file", path1, "--env-file", path2, testutil.CommonImage, "sh", "-c", "echo -n $TESTKEY2").AssertOutExactly("TESTVAL2")
-}
+}*/
 
+/****************************/
+/***** BenchMark Afero ******/
+/****************************/
 
 func TestRunEnvFile(t *testing.T) {
 	t.Parallel()
