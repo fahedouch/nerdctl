@@ -22,13 +22,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
-	"os"
-	"path"
-	"path/filepath"
-	"runtime"
-	"strings"
-
 	"github.com/containerd/console"
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/cio"
@@ -59,7 +52,14 @@ import (
 	"github.com/docker/cli/opts"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"github.com/sirupsen/logrus"
+	"github.com/spf13/afero"
 	"github.com/spf13/cobra"
+	"net/url"
+	"os"
+	"path"
+	"path/filepath"
+	"runtime"
+	"strings"
 )
 
 func newRunCommand() *cobra.Command {
@@ -414,7 +414,11 @@ func createContainer(cmd *cobra.Command, ctx context.Context, client *containerd
 		return nil, "", nil, err
 	}
 	if envFiles := strutil.DedupeStrSlice(envFile); len(envFiles) > 0 {
-		env, err := parseEnvVars(envFiles)
+		/*if v, ok := os.LookupEnv("FS"); ok {
+			tomlPath = v
+		}*/
+		memFS := afero.NewMemMapFs()
+		env, err := parseEnvVars(envFiles, memFS)
 		if err != nil {
 			return nil, "", nil, err
 		}
@@ -924,10 +928,10 @@ func writeCIDFile(path, id string) error {
 	}
 }
 
-func parseEnvVars(paths []string) ([]string, error) {
+func parseEnvVars(paths []string, fs afero.Fs) ([]string, error) {
 	vars := make([]string, 0)
 	for _, path := range paths {
-		f, err := os.Open(path)
+		f, err := fs.Open(path)
 		if err != nil {
 			return nil, fmt.Errorf("failed to open env file %s: %w", path, err)
 		}

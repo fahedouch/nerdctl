@@ -20,9 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
-	"os"
-
 	"github.com/containerd/console"
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/cio"
@@ -33,6 +30,9 @@ import (
 	"github.com/containerd/nerdctl/pkg/strutil"
 	"github.com/containerd/nerdctl/pkg/taskutil"
 	"github.com/opencontainers/runtime-spec/specs-go"
+	"github.com/spf13/afero"
+	"io"
+	"os"
 
 	"github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
@@ -247,7 +247,8 @@ func generateExecProcessSpec(ctx context.Context, cmd *cobra.Command, args []str
 		return nil, err
 	}
 	if envFiles := strutil.DedupeStrSlice(envFile); len(envFiles) > 0 {
-		env, err := parseEnvVars(envFiles)
+		memFS := afero.NewMemMapFs()
+		env, err := parseEnvVars(envFiles, memFS)
 		if err != nil {
 			return nil, err
 		}

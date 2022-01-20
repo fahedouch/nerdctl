@@ -151,9 +151,9 @@ func TestRunCIDFile(t *testing.T) {
 func BenchmarkTestRunEnvFileWithAfero(b *testing.B) {
 	base := testutil.NewBaseBenchmark(b)
 
-    //init afero mem backend
+	//init afero mem backend
 	memFS := afero.NewMemMapFs()
-    //afs := &afero.Afero{Fs: memFS}
+	//afs := &afero.Afero{Fs: memFS}
 
 	tID := testutil.Identifier(b)
 	file1, err := afero.TempFile(memFS, "", tID)
@@ -167,16 +167,14 @@ func BenchmarkTestRunEnvFileWithAfero(b *testing.B) {
 	err = afero.WriteFile(memFS, path1, []byte("# this is a comment line\nTESTKEY1=TESTVAL1"), 0666)
 	assert.NilError(base.T, err)
 
-
 	memFS.MkdirAll("src/a", 0755)
 	afero.WriteFile(memFS, "src/a/b", []byte("# this is a comment line\nTESTKEY1=TESTVAL1"), 0644)
-
 
 	file2, err := afero.TempFile(memFS, "", tID)
 	assert.NilError(base.T, err)
 	path2 := file2.Name()
-    r, err := os.ReadFile("src/a/b")
-    b.Log(string(r))
+	r, err := os.ReadFile("src/a/b")
+	b.Log(string(r))
 	/* Useless test cleanup with memory backend */
 	//defer file2.Close()
 	//defer os.Remove(path2)
