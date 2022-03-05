@@ -540,6 +540,8 @@ func newContainer(project *compose.Project, parsed *Service, i int) (*Container,
 		c.RunArgs = append(c.RunArgs, "--platform="+svc.Platform)
 	}
 
+
+
 	for _, p := range svc.Ports {
 		pStr, err := servicePortConfigToFlagP(p)
 		if err != nil {
@@ -784,5 +786,39 @@ func fileReferenceConfigToFlagV(c types.FileReferenceConfig, project *types.Proj
 	}
 
 	s := fmt.Sprintf("%s:%s:ro", src, target)
+	return s, nil
+}
+
+func ServiceNetworkConfigToFlag(c types.ServiceNetworkConfig) (string, error) {
+	if unknown := reflectutil.UnknownNonEmptyFields(&c,
+		"Priority",
+		"Aliases",
+		"Ipv4Address",
+		"Ipv6Address",
+	); len(unknown) > 0 {
+		logrus.Warnf("Ignoring: network: %+v", unknown)
+	}
+	switch c.Mode {
+	case "", "ingress":
+	default:
+		return "", fmt.Errorf("unsupported port mode: %s", c.Mode)
+	}
+	if c.Published == "" {
+		return "", fmt.Errorf("unsupported port number: %q", c.Published)
+	}
+	if c.Target <= 0 {
+		return "", fmt.Errorf("unsupported port number: %d", c.Target)
+	}
+	s := fmt.Sprintf("%s:%d", c.Published, c.Target)
+	if c.HostIP != "" {
+		if strings.Contains(c.HostIP, ":") {
+			s = fmt.Sprintf("[%s]:%s", c.HostIP, s)
+		} else {
+			s = fmt.Sprintf("%s:%s", c.HostIP, s)
+		}
+	}
+	if c.Protocol != "" {
+		s = fmt.Sprintf("%s/%s", s, c.Protocol)
+	}
 	return s, nil
 }
