@@ -321,40 +321,45 @@ func getRestart(svc compose.ServiceConfig) (string, error) {
 }
 
 // getNetworks returns full network names, e.g., {"compose-wordpress_default"}, or {"host"}
-func getNetworks(project *compose.Project, svc compose.ServiceConfig) ([]string, error) {
+func getNetworks(project *compose.Project, svc compose.ServiceConfig) ([]string, map[string]*types.ServiceNetworkConfig, error) {
 	var fullNames []string // nolint: prealloc
+    var networkConfigs map[string]*types.ServiceNetworkConfig
 
 	if svc.Net != "" {
 		logrus.Warn("net is deprecated, use network_mode or networks")
 		if len(svc.Networks) > 0 {
-			return nil, errors.New("networks and net must not be set together")
+			return nil, nil, errors.New("networks and net must not be set together")
 		}
 		fullNames = append(fullNames, svc.Net)
 	}
 
 	if svc.NetworkMode != "" {
 		if len(svc.Networks) > 0 {
-			return nil, errors.New("networks and network_mode must not be set together")
+			return nil, nil, errors.New("networks and network_mode must not be set together")
 		}
 		if svc.Net != "" && svc.NetworkMode != svc.Net {
-			return nil, errors.New("net and network_mode must not be set together")
+			return nil, nil, errors.New("net and network_mode must not be set together")
 		}
 		if strings.Contains(svc.NetworkMode, ":") {
-			return nil, fmt.Errorf("unsupported network_mode: %q", svc.NetworkMode)
+			return nil, nil, fmt.Errorf("unsupported network_mode: %q", svc.NetworkMode)
 		}
 		fullNames = append(fullNames, svc.NetworkMode)
 	}
 
-	for shortName := range svc.Networks {
+	for shortName, networkConfig := range svc.Networks {
 		net, ok := project.Networks[shortName]
 		if !ok {
-			return nil, fmt.Errorf("invalid network %q", shortName)
+			return nil, nil, fmt.Errorf("invalid network %q", shortName)
 		}
 		fullNames = append(fullNames, net.Name)
+		networkConfigs[net.Name] = config
 	}
-
-	return fullNames, nil
+	return fullNames, networkConfigs, nil
 }
+
+//func getNetworksConfig (c type.ServiceNetworkConfig) types.ServiceNetworkConfig {
+
+//}
 
 func Parse(project *compose.Project, svc compose.ServiceConfig) (*Service, error) {
 	warnUnknownFields(svc)
@@ -511,10 +516,13 @@ func newContainer(project *compose.Project, parsed *Service, i int) (*Container,
 	}
 
 	if networks, err := getNetworks(project, svc); err != nil {
-		return nil, err
+		return nil,nil,  err
 	} else {
-		for _, net := range networks {
+		for _, net, config := range networks {
 			c.RunArgs = append(c.RunArgs, "--net="+net)
+			if config != nil {
+			    c.RunArgs = append(c.RunArgs, )
+			}
 		}
 	}
 
@@ -789,36 +797,21 @@ func fileReferenceConfigToFlagV(c types.FileReferenceConfig, project *types.Proj
 	return s, nil
 }
 
-func ServiceNetworkConfigToFlag(c types.ServiceNetworkConfig) (string, error) {
+func ServiceNetworkIPAddressToFlag(c types.ServiceNetworkConfig) (string, error) {
 	if unknown := reflectutil.UnknownNonEmptyFields(&c,
-		"Priority",
-		"Aliases",
 		"Ipv4Address",
 		"Ipv6Address",
 	); len(unknown) > 0 {
 		logrus.Warnf("Ignoring: network: %+v", unknown)
 	}
-	switch c.Mode {
-	case "", "ingress":
-	default:
-		return "", fmt.Errorf("unsupported port mode: %s", c.Mode)
+
+	var s string
+	if c.Ipv4Address != "" {
+		s := c.Ipv4Address
 	}
-	if c.Published == "" {
-		return "", fmt.Errorf("unsupported port number: %q", c.Published)
+	if c.Ipv6Address != "" {
+		s := c.Ipv6Address
 	}
-	if c.Target <= 0 {
-		return "", fmt.Errorf("unsupported port number: %d", c.Target)
-	}
-	s := fmt.Sprintf("%s:%d", c.Published, c.Target)
-	if c.HostIP != "" {
-		if strings.Contains(c.HostIP, ":") {
-			s = fmt.Sprintf("[%s]:%s", c.HostIP, s)
-		} else {
-			s = fmt.Sprintf("%s:%s", c.HostIP, s)
-		}
-	}
-	if c.Protocol != "" {
-		s = fmt.Sprintf("%s/%s", s, c.Protocol)
-	}
+
 	return s, nil
 }
