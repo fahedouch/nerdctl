@@ -71,10 +71,14 @@ func main() {
 }
 
 func xmain() error {
-	if len(os.Args) == 3 && os.Args[1] == logging.MagicArgv1 {
+	if len(os.Args) >= 3 && os.Args[1] == logging.MagicArgv1 {
 		// containerd runtime v2 logging plugin mode.
-		// "binary://BIN?KEY=VALUE" URI is parsed into Args {BIN, KEY, VALUE}.
-		return logging.Main(os.Args[2])
+		// "binary://BIN?KEY1=VALUE1&KEY2=VALUE2" URI is parsed into Args {BIN, KEY1, VALUE1, KEY2, VALUE2}.
+		argsMap := make(map[string]string)
+		for i := 1; i < len(os.Args); i = i + 2 {
+			argsMap[os.Args[i]] = os.Args[i+1]
+		}
+		return logging.Main(argsMap)
 	}
 	// nerdctl CLI mode
 	app, err := newApp()

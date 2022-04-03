@@ -24,6 +24,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/containerd/nerdctl/pkg/testutil"
 
@@ -211,4 +212,33 @@ func TestRunStdin(t *testing.T) {
 		testutil.WithStdin(strings.NewReader(testStr)),
 	}
 	base.Cmd("run", "--rm", "-i", testutil.CommonImage, "cat").CmdOption(opts...).AssertOutExactly(testStr)
+}
+
+func TestRunWithLogOpt(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("`logging options` are not yet implemented on Windows")
+	}
+	base := testutil.NewBase(t)
+	containerName := testutil.Identifier(t)
+
+	defer base.Cmd("rm", "-f", containerName).AssertOK()
+	base.Cmd("run", "-d", "--log-driver", "json-file", "--log-opt", "max-size=5K", "--log-opt", "max-file=2", "--name", containerName, testutil.CommonImage,
+		"sh", "-euxc", "hexdump -C /dev/urandom | head -n1000").AssertOK()
+
+	time.Sleep(3 * time.Second)
+	inspectedContainer := base.InspectContainer(containerName)
+	logJSONPath := filepath.Dir(inspectedContainer.LogPath)
+	// matches = current log file + old log files to retain
+	matches, err := filepath.Glob(filepath.Join(logJSONPath, inspectedContainer.ID+"*"))
+	assert.NilError(t, err)
+	if len(matches) > 3 {
+		t.Fatal("the maximum number of old log files to retain exceeded 2 files")
+	}
+	for _, file := range matches {
+		fInfo, err := os.Stat(file)
+		assert.NilError(t, err)
+		if fInfo.Size() > 5000 {
+			t.Fatal("file size exceeded 5k")
+		}
+	}
 }
