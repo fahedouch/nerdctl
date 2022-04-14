@@ -7,13 +7,13 @@ require (
 	github.com/compose-spec/compose-go v1.1.0
 	github.com/containerd/cgroups v1.0.3
 	github.com/containerd/console v1.0.3
-	github.com/containerd/containerd v1.6.1
+	github.com/containerd/containerd v1.6.2
 	github.com/containerd/continuity v0.2.2
 	github.com/containerd/go-cni v1.1.3
 	github.com/containerd/imgcrypt v1.1.3
 	github.com/containerd/stargz-snapshotter v0.11.2
 	github.com/containerd/stargz-snapshotter/estargz v0.11.2
-	github.com/containerd/stargz-snapshotter/ipfs v0.11.2
+	github.com/containerd/stargz-snapshotter/ipfs v0.11.4
 	github.com/containerd/typeurl v1.0.2
 	github.com/containernetworking/cni v1.0.1
 	github.com/containernetworking/plugins v1.1.1
@@ -28,7 +28,7 @@ require (
 	github.com/ipfs/go-cid v0.1.0
 	github.com/ipfs/go-ipfs-files v0.1.1
 	github.com/ipfs/go-ipfs-http-client v0.2.0
-	github.com/ipfs/interface-go-ipfs-core v0.5.2
+	github.com/ipfs/interface-go-ipfs-core v0.6.2
 	github.com/jaytaylor/go-hostsfile v0.0.0-20211120191712-f53f85d8b98f
 	github.com/mattn/go-isatty v0.0.14
 	github.com/moby/sys/mount v0.3.1
@@ -85,24 +85,24 @@ require (
 	github.com/inconshreveable/mousetrap v1.0.0 // indirect
 	github.com/ipfs/bbloom v0.0.4 // indirect
 	github.com/ipfs/go-block-format v0.0.3 // indirect
-	github.com/ipfs/go-blockservice v0.1.7 // indirect
-	github.com/ipfs/go-datastore v0.4.5 // indirect
-	github.com/ipfs/go-ipfs-blockstore v0.1.6 // indirect
+	github.com/ipfs/go-blockservice v0.3.0 // indirect
+	github.com/ipfs/go-datastore v0.5.0 // indirect
+	github.com/ipfs/go-ipfs-blockstore v1.2.0 // indirect
 	github.com/ipfs/go-ipfs-cmds v0.6.0 // indirect
-	github.com/ipfs/go-ipfs-ds-help v0.1.1 // indirect
-	github.com/ipfs/go-ipfs-exchange-interface v0.0.1 // indirect
+	github.com/ipfs/go-ipfs-ds-help v1.1.0 // indirect
+	github.com/ipfs/go-ipfs-exchange-interface v0.1.0 // indirect
 	github.com/ipfs/go-ipfs-util v0.0.2 // indirect
 	github.com/ipfs/go-ipld-cbor v0.0.5 // indirect
-	github.com/ipfs/go-ipld-format v0.2.0 // indirect
+	github.com/ipfs/go-ipld-format v0.3.0 // indirect
 	github.com/ipfs/go-ipld-legacy v0.1.0 // indirect
 	github.com/ipfs/go-log v1.0.5 // indirect
-	github.com/ipfs/go-log/v2 v2.1.3 // indirect
-	github.com/ipfs/go-merkledag v0.4.0 // indirect
+	github.com/ipfs/go-log/v2 v2.3.0 // indirect
+	github.com/ipfs/go-merkledag v0.6.0 // indirect
 	github.com/ipfs/go-metrics-interface v0.0.1 // indirect
 	github.com/ipfs/go-path v0.1.1 // indirect
 	github.com/ipfs/go-unixfs v0.2.5 // indirect
 	github.com/ipfs/go-verifcid v0.0.1 // indirect
-	github.com/ipld/go-codec-dagpb v1.3.0 // indirect
+	github.com/ipld/go-codec-dagpb v1.3.2 // indirect
 	github.com/ipld/go-ipld-prime v0.11.0 // indirect
 	github.com/jbenet/goprocess v0.1.4 // indirect
 	github.com/klauspost/compress v1.15.0 // indirect
