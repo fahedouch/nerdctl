@@ -7,18 +7,18 @@ require (
 	github.com/compose-spec/compose-go v1.1.0
 	github.com/containerd/cgroups v1.0.3
 	github.com/containerd/console v1.0.3
-	github.com/containerd/containerd v1.6.1
-	github.com/containerd/continuity v0.2.2
+	github.com/containerd/containerd v1.6.2
+	github.com/containerd/continuity v0.3.0
 	github.com/containerd/go-cni v1.1.3
 	github.com/containerd/imgcrypt v1.1.3
-	github.com/containerd/stargz-snapshotter v0.11.2
-	github.com/containerd/stargz-snapshotter/estargz v0.11.2
+	github.com/containerd/stargz-snapshotter v0.11.4
+	github.com/containerd/stargz-snapshotter/estargz v0.11.4
 	github.com/containerd/stargz-snapshotter/ipfs v0.11.2
 	github.com/containerd/typeurl v1.0.2
 	github.com/containernetworking/cni v1.0.1
 	github.com/containernetworking/plugins v1.1.1
 	github.com/cyphar/filepath-securejoin v0.2.3
-	github.com/docker/cli v20.10.13+incompatible
+	github.com/docker/cli v20.10.14+incompatible
 	github.com/docker/docker v20.10.13+incompatible
 	github.com/docker/go-connections v0.4.0
 	github.com/docker/go-units v0.4.0
@@ -48,7 +48,7 @@ require (
 	golang.org/x/crypto v0.0.0-20211215153901-e495a2d5b3d3
 	golang.org/x/net v0.0.0-20220127200216-cd36cc0744dd
 	golang.org/x/sync v0.0.0-20210220032951-036812b2e83c
-	golang.org/x/sys v0.0.0-20220128215802-99c3d69c2c27
+	golang.org/x/sys v0.0.0-20220405210540-1e041c57c461
 	golang.org/x/term v0.0.0-20210927222741-03fcf44c2211
 	gopkg.in/yaml.v2 v2.4.0
 	gotest.tools/v3 v3.1.0
@@ -105,7 +105,7 @@ require (
 	github.com/ipld/go-codec-dagpb v1.3.0 // indirect
 	github.com/ipld/go-ipld-prime v0.11.0 // indirect
 	github.com/jbenet/goprocess v0.1.4 // indirect
-	github.com/klauspost/compress v1.15.0 // indirect
+	github.com/klauspost/compress v1.15.1 // indirect
 	github.com/klauspost/cpuid/v2 v2.0.6 // indirect
 	github.com/libp2p/go-buffer-pool v0.0.2 // indirect
 	github.com/libp2p/go-libp2p-core v0.8.6 // indirect
@@ -158,7 +158,7 @@ require (
 	golang.org/x/text v0.3.7 // indirect
 	golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1 // indirect
 	google.golang.org/genproto v0.0.0-20220126215142-9970aeb2e350 // indirect
-	google.golang.org/grpc v1.44.0 // indirect
+	google.golang.org/grpc v1.45.0 // indirect
 	google.golang.org/protobuf v1.27.1 // indirect
 	gopkg.in/square/go-jose.v2 v2.5.1 // indirect
 )
