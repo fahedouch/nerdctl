@@ -24,7 +24,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
-	"time"
+
+	//"time"
 
 	"github.com/containerd/nerdctl/pkg/testutil"
 
