@@ -214,7 +214,7 @@ func TestRunStdin(t *testing.T) {
 	base.Cmd("run", "--rm", "-i", testutil.CommonImage, "cat").CmdOption(opts...).AssertOutExactly(testStr)
 }
 
-func TestRunWithLogOpt(t *testing.T) {
+/*func TestRunWithLogOpt(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("`logging options` are not yet implemented on Windows")
 	}
@@ -241,4 +241,4 @@ func TestRunWithLogOpt(t *testing.T) {
 			t.Fatal("file size exceeded 5k")
 		}
 	}
-}
+}*/
