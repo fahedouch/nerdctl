@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - master
+      - implement-log-opt-with-containerd-logging-driver-test
       - 'release/**'
   pull_request:
 
