@@ -75,12 +75,19 @@ func xmain() error {
 		// containerd runtime v2 logging plugin mode.
 		// "binary://BIN?KEY1=VALUE1&KEY2=VALUE2" URI is parsed into Args {BIN, KEY1, VALUE1, KEY2, VALUE2}.
 		argsMap := make(map[string]string)
+		args := os.Args[1:]
+        for i := 0; i < len(args); i +=2 {
+            argsMap[args[i]] = args[i+1]
+        }
 		/*for i := 1; i < len(os.Args); i = i + 2 {
 			if os.Args[i] == "" {
 				break
 			}
 			argsMap[os.Args[i]] = os.Args[i+1]
 		}*/
+		//argsMap[logging.MagicArgv1] = "_NERDCTL_INTERNAL_LOGGING"
+		//argsMap["max-size"] = "5k"
+		//argsMap["max-file"] = "1"
 		return logging.Main(argsMap)
 	}
 	// nerdctl CLI mode
