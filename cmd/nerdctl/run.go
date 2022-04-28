@@ -472,13 +472,9 @@ func createContainer(cmd *cobra.Command, ctx context.Context, client *containerd
 	var logURI string
 	if flagD {
 		// json-file is the built-in and default log driver for nerdctl
-		logDriver := "json-file"
-		if cmd.Flags().Changed("log-driver") {
-			var err error
-			logDriver, err = cmd.Flags().GetString("log-driver")
-			if err != nil {
-				return nil, "", nil, err
-			}
+		logDriver, err := cmd.Flags().GetString("log-driver")
+		if err != nil {
+		    return nil, "", nil, err
 		}
 		logOptMap, err := parseKVStringsMapFromLogOpt(cmd, logDriver)
 		if err != nil {
@@ -488,7 +484,6 @@ func createContainer(cmd *cobra.Command, ctx context.Context, client *containerd
 			return nil, "", nil, err
 		} else if lu != nil {
 			logURI = lu.String()
-			fmt.Println(logURI)
 		}
 	}
 
