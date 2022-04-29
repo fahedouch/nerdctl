@@ -475,7 +475,7 @@ func createContainer(cmd *cobra.Command, ctx context.Context, client *containerd
 		if err != nil {
 			return nil, "", nil, err
 		}
-		_, err = parseKVStringsMapFromLogOpt(cmd, logDriver)
+		logOptMap, err := parseKVStringsMapFromLogOpt(cmd, logDriver)
 		if err != nil {
 			return nil, "", nil, err
 		}
@@ -789,7 +789,6 @@ func generateLogURI(dataStore, logDriver string, logOptMap map[string]string) (*
 	if runtime.GOOS == "windows" {
 		return nil, nil
 	}
-
 	return cio.LogURIGenerator("binary", selfExe, args)
 }
 
