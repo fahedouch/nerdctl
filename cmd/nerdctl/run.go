@@ -115,6 +115,12 @@ func setCreateFlags(cmd *cobra.Command) {
 	cmd.Flags().String("init-binary", tiniInitBinary, "The custom binary to use as the init process")
 	// #endregion
 
+	// #region logging flags
+	// log-opt needs to be StringArray, not StringSlice, to prevent "env=os,customer" from being split to {"env=os", "customer"}
+	cmd.Flags().String("log-driver", "json-file", "Logging driver for the container")
+	cmd.Flags().StringArray("log-opt", nil, "Log driver options")
+	// #endregion
+
 	// #region platform flags
 	cmd.Flags().String("platform", "", "Set platform (e.g. \"amd64\", \"arm64\")") // not a slice, and there is no --all-platforms
 	cmd.RegisterFlagCompletionFunc("platform", shellCompletePlatforms)
@@ -464,6 +470,15 @@ func createContainer(cmd *cobra.Command, ctx context.Context, client *containerd
 
 	var logURI string
 	if flagD {
+		// json-file is the built-in and default log driver for nerdctl
+		logDriver, err := cmd.Flags().GetString("log-driver")
+		if err != nil {
+			return nil, "", nil, err
+		}
+		_, err = parseKVStringsMapFromLogOpt(cmd, logDriver)
+		if err != nil {
+			return nil, "", nil, err
+		}
 		if lu, err := generateLogURI(dataStore); err != nil {
 			return nil, "", nil, err
 		} else if lu != nil {
@@ -583,6 +598,22 @@ func createContainer(cmd *cobra.Command, ctx context.Context, client *containerd
 		return nil, "", nil, err
 	}
 	return container, dataStore, containerNameStore, nil
+}
+
+// parseKVStringsMapFromLogOpt parse log options KV entries and convert to Map
+func parseKVStringsMapFromLogOpt(cmd *cobra.Command, logDriver string) (map[string]string, error) {
+	logOptArray, err := cmd.Flags().GetStringArray("log-opt")
+	if err != nil {
+		return nil, err
+	}
+	logOptArray = strutil.DedupeStrSlice(logOptArray)
+	logOptMap := strutil.ConvertKVStringsToMap(logOptArray)
+	if logDriver == "json-file" {
+		if _, ok := logOptMap[logging.MaxSize]; !ok {
+			delete(logOptMap, logging.MaxFile)
+		}
+	}
+	return logOptMap, nil
 }
 
 func generateRootfsOpts(ctx context.Context, client *containerd.Client, platform string, cmd *cobra.Command, args []string, id string) ([]oci.SpecOpts, []containerd.NewContainerOpts, *imgutil.EnsuredImage, error) {
