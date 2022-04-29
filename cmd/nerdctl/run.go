@@ -776,9 +776,16 @@ func withBindMountHostProcfs(_ context.Context, _ oci.Client, _ *containers.Cont
 }
 
 func generateLogURI(dataStore, logDriver string, logOptMap map[string]string) (*url.URL, error) {
-	selfExe, err := os.Executable()
-	if err != nil {
-		return nil, err
+	var selfExe string
+	if logDriver == "json-file" {
+	    fmt.Println(logDriver)
+		var err error
+		selfExe, err = os.Executable()
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		return nil, fmt.Errorf("%s is not yet supported", logDriver)
 	}
 	args := map[string]string{
 		logging.MagicArgv1: dataStore,
