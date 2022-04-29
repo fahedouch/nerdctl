@@ -479,7 +479,7 @@ func createContainer(cmd *cobra.Command, ctx context.Context, client *containerd
 		if err != nil {
 			return nil, "", nil, err
 		}
-		if lu, err := generateLogURI(dataStore); err != nil {
+		if lu, err := generateLogURI(dataStore, logDriver, logOptMap); err != nil {
 			return nil, "", nil, err
 		} else if lu != nil {
 			logURI = lu.String()
@@ -775,13 +775,16 @@ func withBindMountHostProcfs(_ context.Context, _ oci.Client, _ *containers.Cont
 	return nil
 }
 
-func generateLogURI(dataStore string) (*url.URL, error) {
+func generateLogURI(dataStore, logDriver string, logOptMap map[string]string) (*url.URL, error) {
 	selfExe, err := os.Executable()
 	if err != nil {
 		return nil, err
 	}
 	args := map[string]string{
 		logging.MagicArgv1: dataStore,
+	}
+	for k, v := range logOptMap {
+		args[k] = v
 	}
 	if runtime.GOOS == "windows" {
 		return nil, nil
