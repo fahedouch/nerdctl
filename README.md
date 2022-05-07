@@ -433,28 +433,23 @@ Volume flags:
   Consists of multiple key-value pairs, separated by commas and each
   consisting of a `<key>=<value>` tuple.
   e.g., `-- mount type=bind,source=/src,target=/app,bind-propagation=shared`.
-  - :whale: The `type` of the mount, which can be `bind`, `volume`, `tmpfs`.
+  - :whale: `type`: Current supported mount types are `bind`, `volume`, `tmpfs`.
     The defaul type will be set to `volume` if not specified.
     i.e., `--mount src=vol-1,dst=/app,readonly` equals `--mount type=volum,src=vol-1,dst=/app,readonly`
-  - :whale: The `source` of the mount. For bind mounts, this is the path to the file
-    or directory. May be specified as `source` or `src`.
-  - :whale: The `destination` takes as its value the path where the file or directory
-    is mounted in the container. May be specified as `destination`, `dst`,
-    or `target`.
-  - :whale: The `readonly` or `ro`, `rw`, `rro` option changes filesystem permissinos.
-    See description for `--volume` for more deails.
-  - :whale: The `bind-propagation` option is only for `bind` mount which is used to set the
-    bind propagation. May be one of `rprivate`, `private`, `rshared`, `shared`,
-    `rslave`, `slave`.
-    See description for `--volume` for more deails.
-  - :whale: The `tmpfs-size` and `tmpfs-mode` options are only for `tmpfs` bind mount,
-    e.g., `--mount type=tmpfs,target=/app,tmpfs-size=10m,tmpfs-mode=1770`.
-    - `tmpfs-size`: Size of the tmpfs mount in bytes. Unlimited by default.
-    - `tmpfs-mode`: File mode of the tmpfs in **octal**.
+  - Common Options:
+    - :whale: `src`, `source`: Mount source spec for bind and volume. Mandatory for bind.
+    - :whale: `dst`, `destination`, `target`: Mount destination spec.
+    - :whale: `readonly`, `ro`, `rw`, `rro`: Filesystem permissinos.
+  - Options specific to `bind`:
+    - :whale: `bind-propagation`: `shared`, `slave`, `private`, `rshared`, `rslave`, or `rprivate`(default).
+    - :whale: `bind-nonrecursive`: `true` or `false`(default). If set to true, submounts are not recursively bind-mounted. This option is useful for readonly bind mount.
+    - unimplemented options: `consistency`
+  - Options specific to `tmpfs`:
+    - :whale: `tmpfs-size`: Size of the tmpfs mount in bytes. Unlimited by default.
+    - :whale: `tmpfs-mode`: File mode of the tmpfs in **octal**.
       Defaults to `1777` or world-writable.
-
-Unimplemented `docker run --mount` flags: `bind-nonrecursive`, `volume-nocopy`,
-`volume-label`, `volume-driver`, `volume-opt`, `consistency`.
+  - Options specific to `volume`:
+    - unimplemented options: `volume-nocopy`, `volume-label`, `volume-driver`, `volume-opt`
 
 Rootfs flags:
 - :whale: `--read-only`: Mount the container's root filesystem as read only
