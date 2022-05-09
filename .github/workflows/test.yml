@@ -5,6 +5,7 @@ on:
     branches:
       - master
       - 'release/**'
+      - test-junnplus-bind-nonrecursive
   pull_request:
 
 jobs:
