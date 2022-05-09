@@ -113,7 +113,9 @@ func parseVolumeOptionsWithMountInfo(vType, src, optsRaw string, getMountInfoFun
 			propagationRawOpts = append(propagationRawOpts, opt)
 		case "bind", "rbind":
 			// bind means not recursively bind-mounted, rbind is the opposite
-			bindOpts = append(bindOpts, opt)
+			if vType == Bind {
+			    bindOpts = append(bindOpts, opt)
+			}
 		case "":
 			// NOP
 		default:
