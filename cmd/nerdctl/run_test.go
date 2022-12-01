@@ -248,7 +248,7 @@ func TestRunWithJsonFileLogDriver(t *testing.T) {
 	base.Cmd("run", "-d", "--log-driver", "json-file", "--log-opt", "max-size=5K", "--log-opt", "max-file=2", "--name", containerName, testutil.CommonImage,
 		"sh", "-euxc", "hexdump -C /dev/urandom | head -n1000").AssertOK()
 
-	time.Sleep(3 * time.Second)
+	time.Sleep(4 * time.Second)
 	inspectedContainer := base.InspectContainer(containerName)
 	logJSONPath := filepath.Dir(inspectedContainer.LogPath)
 	// matches = current log file + old log files to retain
@@ -282,7 +282,7 @@ func TestRunWithJsonFileLogDriverAndLogPathOpt(t *testing.T) {
 	base.Cmd("run", "-d", "--log-driver", "json-file", "--log-opt", fmt.Sprintf("log-path=%s", customLogJSONPath), "--log-opt", "max-size=5K", "--log-opt", "max-file=2", "--name", containerName, testutil.CommonImage,
 		"sh", "-euxc", "hexdump -C /dev/urandom | head -n1000").AssertOK()
 
-	time.Sleep(3 * time.Second)
+	time.Sleep(4 * time.Second)
 	rawBytes, err := os.ReadFile(customLogJSONPath)
 	assert.NilError(t, err)
 	if len(rawBytes) == 0 {

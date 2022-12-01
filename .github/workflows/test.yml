@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - 'release/**'
+      - test-log-driver-with-more-time
   pull_request:
 
 jobs:
