@@ -196,13 +196,6 @@ func removeContainer(ctx context.Context, cmd *cobra.Command, container containe
 		if !force {
 			return statusError{fmt.Errorf("you cannot remove a %v container %v. Stop the container before attempting removal or force remove", status.Status, id)}
 		}
-		if err := task.Kill(ctx, syscall.SIGKILL); err != nil {
-			logrus.WithError(err).Warnf("failed to send SIGKILL")
-		}
-		es, err := task.Wait(ctx)
-		if err == nil {
-			<-es
-		}
 		_, err = task.Delete(ctx, containerd.WithProcessKill)
 		if err != nil && !errdefs.IsNotFound(err) {
 			logrus.WithError(err).Warnf("failed to delete task %v", id)
