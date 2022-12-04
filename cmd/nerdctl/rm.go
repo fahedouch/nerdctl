@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"syscall"
 
 	"github.com/containerd/containerd"
 	"github.com/containerd/containerd/cio"
