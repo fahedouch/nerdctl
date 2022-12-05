@@ -20,6 +20,7 @@ import (
 	"container/ring"
 	"encoding/json"
 	"fmt"
+	"github.com/fahedouch/go-logrotate"
 	"io"
 	"path/filepath"
 	"strconv"
@@ -44,9 +45,8 @@ func Path(dataStore, ns, id string) string {
 	return filepath.Join(dataStore, "containers", ns, id, id+"-json.log")
 }
 
-func Encoode(stdout <-chan string, stderr <-chan string, writer io.Writer) error {
-	enc := json.NewEncoder(writer)
-	var encMu sync.Mutex
+func Encode(stdout <-chan string, stderr <-chan string, logger interface{}) error {
+	l := logger.(io.Writer)
 	var wg sync.WaitGroup
 	wg.Add(2)
 	f := func(dataChan <-chan string, name string) {
@@ -57,12 +57,16 @@ func Encoode(stdout <-chan string, stderr <-chan string, writer io.Writer) error
 		for log := range dataChan {
 			e.Log = log + "\n"
 			e.Time = time.Now().UTC()
-			encMu.Lock()
-			encErr := enc.Encode(e)
-			encMu.Unlock()
-			if encErr != nil {
-				logrus.WithError(encErr).Errorf("failed to encode JSON")
-				return
+			var err error
+			switch name {
+			case "stdout":
+				err = writeEntry(e, l, nil, time.Time{}, false, "", "")
+			case "stderr":
+				err = writeEntry(e, nil, l, time.Time{}, false, "", "")
+			default:
+			}
+			if err != nil {
+				logrus.Errorf("error while writing log entry to output stream: %s", err)
 			}
 		}
 	}
