@@ -182,3 +182,5 @@ require (
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	lukechampine.com/blake3 v1.1.6 // indirect
 )
+
+replace github.com/fahedouch/go-logrotate v0.1.2 => github.com/fahedouch/go-logrotate v0.1.3-0.20221205151034-29f678f9dd8d

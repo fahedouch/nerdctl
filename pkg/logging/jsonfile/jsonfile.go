@@ -20,7 +20,6 @@ import (
 	"container/ring"
 	"encoding/json"
 	"fmt"
-	"github.com/fahedouch/go-logrotate"
 	"io"
 	"path/filepath"
 	"strconv"
@@ -45,8 +44,7 @@ func Path(dataStore, ns, id string) string {
 	return filepath.Join(dataStore, "containers", ns, id, id+"-json.log")
 }
 
-func Encode(stdout <-chan string, stderr <-chan string, logger interface{}) error {
-	l := logger.(io.Writer)
+func Encode(stdout <-chan string, stderr <-chan string, writer io.Writer) error {
 	var wg sync.WaitGroup
 	wg.Add(2)
 	f := func(dataChan <-chan string, name string) {
@@ -60,9 +58,9 @@ func Encode(stdout <-chan string, stderr <-chan string, logger interface{}) erro
 			var err error
 			switch name {
 			case "stdout":
-				err = writeEntry(e, l, nil, time.Time{}, false, "", "")
+				err = writeEntry(e, writer, nil, time.Time{}, true, "", "")
 			case "stderr":
-				err = writeEntry(e, nil, l, time.Time{}, false, "", "")
+				err = writeEntry(e, nil, writer, time.Time{}, true, "", "")
 			default:
 			}
 			if err != nil {

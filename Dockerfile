@@ -293,7 +293,7 @@ RUN curl -L -o nydus-static.tgz "https://github.com/dragonflyoss/image-service/r
     tar xzf nydus-static.tgz && \
     mv nydus-static/nydus-image nydus-static/nydusd nydus-static/nydusify /usr/bin/ && \
     rm nydus-static.tgz
-CMD ["go", "test", "-v", "-timeout=20m", "./cmd/nerdctl/...", "-args", "-test.kill-daemon"]
+CMD ["go", "test", "-run", "TestRunWithJsonFileLogDriver", "-v", "-timeout=20m", "./cmd/nerdctl/...", "-args", "-test.kill-daemon"]
 
 FROM test-integration AS test-integration-rootless
 # Install SSH for creating systemd user session.
