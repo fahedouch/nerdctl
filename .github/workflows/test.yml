@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - 'release/**'
+      - test-logger
   pull_request:
 
 jobs:
