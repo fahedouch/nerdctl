@@ -251,6 +251,10 @@ func TestRunWithJsonFileLogDriver(t *testing.T) {
 	time.Sleep(3 * time.Second)
 	inspectedContainer := base.InspectContainer(containerName)
 	logJSONPath := filepath.Dir(inspectedContainer.LogPath)
+	matchesAll, err := filepath.Glob(filepath.Join(logJSONPath, "*"))
+	for _, v := range matchesAll {
+		t.Log(v)
+	}
 	// matches = current log file + old log files to retain
 	matches, err := filepath.Glob(filepath.Join(logJSONPath, inspectedContainer.ID+"*"))
 	assert.NilError(t, err)
