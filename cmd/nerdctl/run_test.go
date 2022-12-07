@@ -291,16 +291,14 @@ func TestRunWithJsonFileLogDriverAndLogPathOpt(t *testing.T) {
 		"sh", "-euxc", "hexdump -C /dev/urandom | head -n1000").AssertOK()
 
 	time.Sleep(3 * time.Second)
-	inspectedContainer := base.InspectContainer(containerName)
-	t.Log(inspectedContainer)
-	logJSONPath := filepath.Dir(inspectedContainer.LogPath)
-	t.Log(logJSONPath)
-	matchesAll, err := filepath.Glob(filepath.Join(logJSONPath, "*"))
-	for _, v := range matchesAll {
+	matchesALL, err := filepath.Glob(filepath.Join(filepath.Dir(customLogJSONPath), "*"))
+	for _, v := range matchesALL {
 		t.Log(v)
 		rawBytes, _ := os.ReadFile(v)
 		t.Log(string(rawBytes))
 	}
+	assert.NilError(t, err)
+
 	rawBytes, err := os.ReadFile(customLogJSONPath)
 	assert.NilError(t, err)
 	if len(rawBytes) == 0 {
