@@ -250,7 +250,9 @@ func TestRunWithJsonFileLogDriver(t *testing.T) {
 
 	time.Sleep(3 * time.Second)
 	inspectedContainer := base.InspectContainer(containerName)
+	t.Log(inspectedContainer)
 	logJSONPath := filepath.Dir(inspectedContainer.LogPath)
+	t.Log(logJSONPath)
 	matchesAll, err := filepath.Glob(filepath.Join(logJSONPath, "*"))
 	for _, v := range matchesAll {
 		t.Log(v)
@@ -290,7 +292,9 @@ func TestRunWithJsonFileLogDriverAndLogPathOpt(t *testing.T) {
 
 	time.Sleep(3 * time.Second)
 	inspectedContainer := base.InspectContainer(containerName)
+	t.Log(inspectedContainer)
 	logJSONPath := filepath.Dir(inspectedContainer.LogPath)
+	t.Log(logJSONPath)
 	matchesAll, err := filepath.Glob(filepath.Join(logJSONPath, "*"))
 	for _, v := range matchesAll {
 		t.Log(v)
