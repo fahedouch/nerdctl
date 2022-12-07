@@ -254,6 +254,8 @@ func TestRunWithJsonFileLogDriver(t *testing.T) {
 	matchesAll, err := filepath.Glob(filepath.Join(logJSONPath, "*"))
 	for _, v := range matchesAll {
 		t.Log(v)
+		rawBytes, _ := os.ReadFile(v)
+		t.Log(string(rawBytes))
 	}
 	// matches = current log file + old log files to retain
 	matches, _ := filepath.Glob(filepath.Join(logJSONPath, inspectedContainer.ID+"*"))
@@ -287,6 +289,14 @@ func TestRunWithJsonFileLogDriverAndLogPathOpt(t *testing.T) {
 		"sh", "-euxc", "hexdump -C /dev/urandom | head -n1000").AssertOK()
 
 	time.Sleep(3 * time.Second)
+	inspectedContainer := base.InspectContainer(containerName)
+	logJSONPath := filepath.Dir(inspectedContainer.LogPath)
+	matchesAll, err := filepath.Glob(filepath.Join(logJSONPath, "*"))
+	for _, v := range matchesAll {
+		t.Log(v)
+		rawBytes, _ := os.ReadFile(v)
+		t.Log(string(rawBytes))
+	}
 	rawBytes, err := os.ReadFile(customLogJSONPath)
 	assert.NilError(t, err)
 	if len(rawBytes) == 0 {
