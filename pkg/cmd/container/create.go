@@ -883,7 +883,11 @@ func writeCIDFile(path, id string) error {
 }
 
 // generateLogConfig creates a LogConfig for the current container store
+<<<<<<< HEAD
 func generateLogConfig(dataStore string, id string, logDriver string, logOpt []string, ns, address string) (logConfig logging.LogConfig, err error) {
+=======
+func generateLogConfig(dataStore string, id string, logDriver string, logOpt []string, gOpt *types.GlobalCommandOptions) (logConfig logging.LogConfig, err error) {
+>>>>>>> a45f5d11 (fix: shutdown logger after container process exits)
 	var u *url.URL
 	if u, err = url.Parse(logDriver); err == nil && u.Scheme != "" {
 		logConfig.LogURI = logDriver
@@ -912,7 +916,7 @@ func generateLogConfig(dataStore string, id string, logDriver string, logOpt []s
 			return logConfig, err
 		}
 
-		logConfigFilePath := logging.LogConfigFilePath(dataStore, ns, id)
+		logConfigFilePath := logging.LogConfigFilePath(dataStore, gOpt.Namespace, id)
 		if err = os.WriteFile(logConfigFilePath, logConfigB, 0600); err != nil {
 			return logConfig, err
 		}
