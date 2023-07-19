@@ -123,17 +123,10 @@ func Main(argv2 string) error {
 
 // LogConfig is marshalled as "log-config.json"
 type LogConfig struct {
-<<<<<<< HEAD
 	Driver  string            `json:"driver"`
 	Opts    map[string]string `json:"opts,omitempty"`
 	LogURI  string            `json:"-"`
 	Address string            `json:"address"`
-=======
-	Driver      string            `json:"driver"`
-	Opts        map[string]string `json:"opts,omitempty"`
-	HostAddress string            `json:"host"`
-	LogURI      string            `json:"-"`
->>>>>>> a45f5d11 (fix: shutdown logger after container process exits)
 }
 
 // LogConfigFilePath returns the path of log-config.json
