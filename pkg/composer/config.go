@@ -72,7 +72,7 @@ func (c *Composer) Config(ctx context.Context, w io.Writer, co ConfigOptions) er
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(w, "%s", projectYAML)
+	fmt.Fprint(w, projectYAML)
 	return nil
 }
 
