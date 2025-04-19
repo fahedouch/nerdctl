@@ -29,6 +29,7 @@ import (
 	"github.com/containerd/nerdctl/mod/tigron/test"
 
 	"github.com/containerd/nerdctl/v2/pkg/inspecttypes/dockercompat"
+	"github.com/containerd/nerdctl/v2/pkg/testutil"
 	"github.com/containerd/nerdctl/v2/pkg/testutil/nerdtest"
 )
 
@@ -43,7 +44,7 @@ func TestNetworkInspect(t *testing.T) {
 
 	testCase.Setup = func(data test.Data, helpers test.Helpers) {
 		helpers.Ensure("network", "create", data.Identifier("basenet"))
-		data.Set("basenet", data.Identifier("basenet"))
+		data.Labels().Set("basenet", data.Identifier("basenet"))
 	}
 
 	testCase.Cleanup = func(data test.Data, helpers test.Helpers) {
@@ -132,7 +133,7 @@ func TestNetworkInspect(t *testing.T) {
 			Description: "match exact id",
 			// See notes below
 			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
-				id := strings.TrimSpace(helpers.Capture("network", "inspect", data.Get("basenet"), "--format", "{{ .Id }}"))
+				id := strings.TrimSpace(helpers.Capture("network", "inspect", data.Labels().Get("basenet"), "--format", "{{ .Id }}"))
 				return helpers.Command("network", "inspect", id)
 			},
 			Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
@@ -142,7 +143,7 @@ func TestNetworkInspect(t *testing.T) {
 						err := json.Unmarshal([]byte(stdout), &dc)
 						assert.NilError(t, err, "Unable to unmarshal output\n"+info)
 						assert.Equal(t, 1, len(dc), "Unexpectedly got multiple results\n"+info)
-						assert.Equal(t, dc[0].Name, data.Get("basenet"))
+						assert.Equal(t, dc[0].Name, data.Labels().Get("basenet"))
 					},
 				}
 			},
@@ -153,7 +154,7 @@ func TestNetworkInspect(t *testing.T) {
 			// This is bizarre, as it is working in the match exact id test - and there does not seem to be a particular reason for that
 			Require: require.Not(require.Windows),
 			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
-				id := strings.TrimSpace(helpers.Capture("network", "inspect", data.Get("basenet"), "--format", "{{ .Id }}"))
+				id := strings.TrimSpace(helpers.Capture("network", "inspect", data.Labels().Get("basenet"), "--format", "{{ .Id }}"))
 				return helpers.Command("network", "inspect", id[0:25])
 			},
 			Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
@@ -163,7 +164,7 @@ func TestNetworkInspect(t *testing.T) {
 						err := json.Unmarshal([]byte(stdout), &dc)
 						assert.NilError(t, err, "Unable to unmarshal output\n"+info)
 						assert.Equal(t, 1, len(dc), "Unexpectedly got multiple results\n"+info)
-						assert.Equal(t, dc[0].Name, data.Get("basenet"))
+						assert.Equal(t, dc[0].Name, data.Labels().Get("basenet"))
 					},
 				}
 			},
@@ -174,15 +175,15 @@ func TestNetworkInspect(t *testing.T) {
 			// This is bizarre, as it is working in the match exact id test - and there does not seem to be a particular reason for that
 			Require: require.Not(require.Windows),
 			Setup: func(data test.Data, helpers test.Helpers) {
-				id := strings.TrimSpace(helpers.Capture("network", "inspect", data.Get("basenet"), "--format", "{{ .Id }}"))
+				id := strings.TrimSpace(helpers.Capture("network", "inspect", data.Labels().Get("basenet"), "--format", "{{ .Id }}"))
 				helpers.Ensure("network", "create", id[0:12])
-				data.Set("netname", id[0:12])
+				data.Labels().Set("netname", id[0:12])
 			},
 			Cleanup: func(data test.Data, helpers test.Helpers) {
-				helpers.Anyhow("network", "remove", data.Get("netname"))
+				helpers.Anyhow("network", "remove", data.Labels().Get("netname"))
 			},
 			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
-				return helpers.Command("network", "inspect", data.Get("netname"))
+				return helpers.Command("network", "inspect", data.Labels().Get("netname"))
 			},
 			Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
 				return &test.Expected{
@@ -191,7 +192,7 @@ func TestNetworkInspect(t *testing.T) {
 						err := json.Unmarshal([]byte(stdout), &dc)
 						assert.NilError(t, err, "Unable to unmarshal output\n"+info)
 						assert.Equal(t, 1, len(dc), "Unexpectedly got multiple results\n"+info)
-						assert.Equal(t, dc[0].Name, data.Get("netname"))
+						assert.Equal(t, dc[0].Name, data.Labels().Get("netname"))
 					},
 				}
 			},
@@ -274,6 +275,42 @@ func TestNetworkInspect(t *testing.T) {
 						com.Run(&test.Expected{
 							Output: expect.DoesNotContain(data.Identifier()),
 						})
+					},
+				}
+			},
+		},
+		{
+			Description: "Verify that only active containers appear in the network inspect output",
+			Setup: func(data test.Data, helpers test.Helpers) {
+				helpers.Ensure("network", "create", data.Identifier("nginx-network-1"))
+				helpers.Ensure("network", "create", data.Identifier("nginx-network-2"))
+				helpers.Ensure("create", "--name", data.Identifier("nginx-container-1"), "--network", data.Identifier("nginx-network-1"), testutil.NginxAlpineImage)
+				helpers.Ensure("create", "--name", data.Identifier("nginx-container-2"), "--network", data.Identifier("nginx-network-1"), testutil.NginxAlpineImage)
+				helpers.Ensure("create", "--name", data.Identifier("nginx-container-on-diff-network"), "--network", data.Identifier("nginx-network-2"), testutil.NginxAlpineImage)
+				helpers.Ensure("start", data.Identifier("nginx-container-1"), data.Identifier("nginx-container-on-diff-network"))
+				data.Labels().Set("nginx-container-1-id", strings.Trim(helpers.Capture("inspect", data.Identifier("nginx-container-1"), "--format", "{{.Id}}"), "\n"))
+			},
+			Cleanup: func(data test.Data, helpers test.Helpers) {
+				helpers.Anyhow("rm", "-f", data.Identifier("nginx-container-1"))
+				helpers.Anyhow("rm", "-f", data.Identifier("nginx-container-2"))
+				helpers.Anyhow("rm", "-f", data.Identifier("nginx-container-on-diff-network"))
+				helpers.Anyhow("network", "remove", data.Identifier("nginx-network-1"))
+				helpers.Anyhow("network", "remove", data.Identifier("nginx-network-2"))
+			},
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				return helpers.Command("network", "inspect", data.Identifier("nginx-network-1"))
+			},
+			Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
+				return &test.Expected{
+					Output: func(stdout string, info string, t *testing.T) {
+						var dc []dockercompat.Network
+						err := json.Unmarshal([]byte(stdout), &dc)
+						assert.NilError(t, err, "Unable to unmarshal output\n"+info)
+						assert.Equal(t, 1, len(dc), "Unexpectedly got multiple results\n"+info)
+						assert.Equal(t, dc[0].Name, data.Identifier("nginx-network-1"))
+						// Assert only the "running" containers on the same network are returned.
+						assert.Equal(t, 1, len(dc[0].Containers), "Expected a single container as per configuration, but got multiple.")
+						assert.Equal(t, data.Identifier("nginx-container-1"), dc[0].Containers[data.Labels().Get("nginx-container-1-id")].Name)
 					},
 				}
 			},

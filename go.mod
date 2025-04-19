@@ -25,14 +25,14 @@ require (
 	github.com/containerd/stargz-snapshotter/estargz v0.16.3
 	github.com/containerd/stargz-snapshotter/ipfs v0.16.3
 	github.com/containerd/typeurl/v2 v2.2.3
-	github.com/containernetworking/cni v1.2.3
+	github.com/containernetworking/cni v1.3.0
 	github.com/containernetworking/plugins v1.6.2
 	github.com/coreos/go-iptables v0.8.0
 	github.com/coreos/go-systemd/v22 v22.5.0
 	github.com/cyphar/filepath-securejoin v0.4.1
 	github.com/distribution/reference v0.6.0
-	github.com/docker/cli v28.1.0+incompatible
-	github.com/docker/docker v28.1.0+incompatible
+	github.com/docker/cli v28.1.1+incompatible
+	github.com/docker/docker v28.1.1+incompatible
 	github.com/docker/go-connections v0.5.0
 	github.com/docker/go-units v0.5.0
 	github.com/fahedouch/go-logrotate v0.3.0

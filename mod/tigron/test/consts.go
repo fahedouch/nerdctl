@@ -14,15 +14,13 @@
    limitations under the License.
 */
 
-package native
+package test
 
-import "encoding/json"
-
-// Network corresponds to pkg/netutil.NetworkConfig
-type Network struct {
-	CNI           json.RawMessage    `json:"CNI,omitempty"`
-	NerdctlID     *string            `json:"NerdctlID"`
-	NerdctlLabels *map[string]string `json:"NerdctlLabels,omitempty"`
-	File          string             `json:"File,omitempty"`
-	Containers    []*Container       `json:"Containers"`
-}
+const (
+	// FilePermissionsDefault specifies the default creation mode for temporary files.
+	// Note that umask will affect these.
+	FilePermissionsDefault = 0o644
+	// DirPermissionsDefault specifies the default creation mode for temporary directories.
+	// Note that umask will affect these.
+	DirPermissionsDefault = 0o755
+)
