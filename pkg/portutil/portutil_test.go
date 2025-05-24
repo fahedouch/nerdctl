@@ -22,6 +22,8 @@ import (
 	"sort"
 	"testing"
 
+	"gotest.tools/v3/assert"
+
 	"github.com/containerd/go-cni"
 
 	"github.com/containerd/nerdctl/v2/pkg/labels"
@@ -29,7 +31,7 @@ import (
 )
 
 func TestTestParseFlagPWithPlatformSpec(t *testing.T) {
-	if runtime.GOOS != "Linux" || rootlessutil.IsRootless() {
+	if runtime.GOOS != "linux" || rootlessutil.IsRootless() {
 		t.Skip("no non-Linux platform or rootless mode in Linux are not supported yet")
 	}
 	type args struct {
@@ -48,7 +50,6 @@ func TestTestParseFlagPWithPlatformSpec(t *testing.T) {
 			},
 			want: []cni.PortMapping{
 				{
-					HostPort:      3000,
 					ContainerPort: 3000,
 					Protocol:      "tcp",
 					HostIP:        "0.0.0.0",
@@ -63,13 +64,11 @@ func TestTestParseFlagPWithPlatformSpec(t *testing.T) {
 			},
 			want: []cni.PortMapping{
 				{
-					HostPort:      3000,
 					ContainerPort: 3000,
 					Protocol:      "tcp",
 					HostIP:        "0.0.0.0",
 				},
 				{
-					HostPort:      3001,
 					ContainerPort: 3001,
 					Protocol:      "tcp",
 					HostIP:        "0.0.0.0",
@@ -92,13 +91,11 @@ func TestTestParseFlagPWithPlatformSpec(t *testing.T) {
 			},
 			want: []cni.PortMapping{
 				{
-					HostPort:      3000,
 					ContainerPort: 3000,
 					Protocol:      "tcp",
 					HostIP:        "0.0.0.0",
 				},
 				{
-					HostPort:      3001,
 					ContainerPort: 3001,
 					Protocol:      "tcp",
 					HostIP:        "0.0.0.0",
@@ -113,15 +110,13 @@ func TestTestParseFlagPWithPlatformSpec(t *testing.T) {
 			},
 			want: []cni.PortMapping{
 				{
-					HostPort:      3000,
 					ContainerPort: 3000,
-					Protocol:      "tcp",
+					Protocol:      "udp",
 					HostIP:        "0.0.0.0",
 				},
 				{
-					HostPort:      3001,
 					ContainerPort: 3001,
-					Protocol:      "tcp",
+					Protocol:      "udp",
 					HostIP:        "0.0.0.0",
 				},
 			},
@@ -131,37 +126,30 @@ func TestTestParseFlagPWithPlatformSpec(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := ParseFlagP(tt.args.s)
-			t.Log(err)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("ParseFlagP() error = %v, wantErr %v", err, tt.wantErr)
-				return
+			if err != nil {
+				t.Log(err)
+				assert.Equal(t, true, tt.wantErr)
 			}
 			if !reflect.DeepEqual(got, tt.want) {
-				if len(got) == len(tt.want) {
-					if len(got) > 1 {
-						var hostPorts []int32
-						var containerPorts []int32
-						for _, value := range got {
-							hostPorts = append(hostPorts, value.HostPort)
-							containerPorts = append(containerPorts, value.ContainerPort)
-						}
-						sort.Slice(hostPorts, func(i, j int) bool {
-							return i < j
-						})
-						sort.Slice(containerPorts, func(i, j int) bool {
-							return i < j
-						})
-						if (hostPorts[len(hostPorts)-1] - hostPorts[0]) != (containerPorts[len(hostPorts)-1] - containerPorts[0]) {
-							t.Errorf("ParseFlagP() = %v, want %v", got, tt.want)
-						}
+				assert.Equal(t, len(got), len(tt.want))
+				if len(got) > 0 {
+					sort.Slice(got, func(i, j int) bool {
+						return got[i].HostPort < got[j].HostPort
+					})
+					assert.Equal(
+						t,
+						got[len(got)-1].HostPort-got[0].HostPort,
+						got[len(got)-1].ContainerPort-got[0].ContainerPort,
+					)
+					for i := range len(got) {
+						assert.Equal(t, got[i].ContainerPort, tt.want[i].ContainerPort)
+						assert.Equal(t, got[i].Protocol, tt.want[i].Protocol)
+						assert.Equal(t, got[i].HostIP, tt.want[i].HostIP)
 					}
-				} else {
-					t.Errorf("ParseFlagP() = %v, want %v", got, tt.want)
 				}
 			}
 		})
 	}
-
 }
 
 func TestParsePortsLabel(t *testing.T) {
@@ -178,10 +166,10 @@ func TestParsePortsLabel(t *testing.T) {
 			},
 			want: []cni.PortMapping{
 				{
-					HostPort:      3000,
-					ContainerPort: 8080,
+					HostPort:      12345,
+					ContainerPort: 10000,
 					Protocol:      "tcp",
-					HostIP:        "127.0.0.1",
+					HostIP:        "0.0.0.0",
 				},
 			},
 			wantErr: false,
@@ -212,32 +200,27 @@ func TestParsePortsLabel(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			got, err := ParsePortsLabel(tt.labelMap)
-			t.Log(err)
-			if (err != nil) != tt.wantErr {
-				t.Errorf("ParsePortsLabel() error = %v, wantErr %v", err, tt.wantErr)
-				return
+			if err != nil {
+				t.Log(err)
+				assert.Equal(t, true, tt.wantErr)
 			}
 			if !reflect.DeepEqual(got, tt.want) {
-				if len(got) == len(tt.want) {
-					if len(got) > 1 {
-						var hostPorts []int32
-						var containerPorts []int32
-						for _, value := range got {
-							hostPorts = append(hostPorts, value.HostPort)
-							containerPorts = append(containerPorts, value.ContainerPort)
-						}
-						sort.Slice(hostPorts, func(i, j int) bool {
-							return i < j
-						})
-						sort.Slice(containerPorts, func(i, j int) bool {
-							return i < j
-						})
-						if (hostPorts[len(hostPorts)-1] - hostPorts[0]) != (containerPorts[len(hostPorts)-1] - containerPorts[0]) {
-							t.Errorf("ParsePortsLabel() = %v, want %v", got, tt.want)
-						}
+				assert.Equal(t, len(got), len(tt.want))
+				if len(got) > 0 {
+					sort.Slice(got, func(i, j int) bool {
+						return got[i].HostPort < got[j].HostPort
+					})
+					assert.Equal(
+						t,
+						got[len(got)-1].HostPort-got[0].HostPort,
+						got[len(got)-1].ContainerPort-got[0].ContainerPort,
+					)
+					for i := range len(got) {
+						assert.Equal(t, got[i].HostPort, tt.want[i].HostPort)
+						assert.Equal(t, got[i].ContainerPort, tt.want[i].ContainerPort)
+						assert.Equal(t, got[i].Protocol, tt.want[i].Protocol)
+						assert.Equal(t, got[i].HostIP, tt.want[i].HostIP)
 					}
-				} else {
-					t.Errorf("ParsePortsLabel() = %v, want %v", got, tt.want)
 				}
 			}
 		})
