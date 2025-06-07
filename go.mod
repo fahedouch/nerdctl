@@ -1,18 +1,18 @@
 //gomodjail:confined
 module github.com/containerd/nerdctl/v2
 
-go 1.23.0
+go 1.23.5
 
 require (
 	github.com/Masterminds/semver/v3 v3.3.1
 	github.com/Microsoft/go-winio v0.6.2
 	github.com/Microsoft/hcsshim v0.13.0
-	github.com/compose-spec/compose-go/v2 v2.6.2 //gomodjail:unconfined
+	github.com/compose-spec/compose-go/v2 v2.6.4 //gomodjail:unconfined
 	github.com/containerd/accelerated-container-image v1.3.0
 	github.com/containerd/cgroups/v3 v3.0.5 //gomodjail:unconfined
-	github.com/containerd/console v1.0.4 //gomodjail:unconfined
+	github.com/containerd/console v1.0.5 //gomodjail:unconfined
 	github.com/containerd/containerd/api v1.9.0
-	github.com/containerd/containerd/v2 v2.1.0 //gomodjail:unconfined
+	github.com/containerd/containerd/v2 v2.1.1 //gomodjail:unconfined
 	github.com/containerd/continuity v0.4.5 //gomodjail:unconfined
 	github.com/containerd/errdefs v1.0.0
 	github.com/containerd/fifo v1.1.0 //gomodjail:unconfined
@@ -20,7 +20,7 @@ require (
 	github.com/containerd/imgcrypt/v2 v2.0.1 //gomodjail:unconfined
 	github.com/containerd/log v0.1.0
 	github.com/containerd/nerdctl/mod/tigron v0.0.0
-	github.com/containerd/nydus-snapshotter v0.15.1 //gomodjail:unconfined
+	github.com/containerd/nydus-snapshotter v0.15.2 //gomodjail:unconfined
 	github.com/containerd/platforms v1.0.0-rc.1 //gomodjail:unconfined
 	github.com/containerd/stargz-snapshotter v0.16.3 //gomodjail:unconfined
 	github.com/containerd/stargz-snapshotter/estargz v0.16.3 //gomodjail:unconfined
@@ -28,17 +28,17 @@ require (
 	github.com/containerd/typeurl/v2 v2.2.3
 	github.com/containernetworking/cni v1.3.0 //gomodjail:unconfined
 	github.com/containernetworking/plugins v1.7.1 //gomodjail:unconfined
-	github.com/coreos/go-iptables v0.8.0
+	github.com/coreos/go-iptables v0.8.0 //gomodjail:unconfined
 	github.com/coreos/go-systemd/v22 v22.5.0
 	github.com/cyphar/filepath-securejoin v0.4.1 //gomodjail:unconfined
 	github.com/distribution/reference v0.6.0
-	github.com/docker/cli v28.1.1+incompatible //gomodjail:unconfined
-	github.com/docker/docker v28.1.1+incompatible //gomodjail:unconfined
+	github.com/docker/cli v28.2.2+incompatible //gomodjail:unconfined
+	github.com/docker/docker v28.2.2+incompatible //gomodjail:unconfined
 	github.com/docker/go-connections v0.5.0
 	github.com/docker/go-units v0.5.0
 	github.com/fahedouch/go-logrotate v0.3.0 //gomodjail:unconfined
 	github.com/fatih/color v1.18.0 //gomodjail:unconfined
-	github.com/fluent/fluent-logger-golang v1.9.0
+	github.com/fluent/fluent-logger-golang v1.10.0
 	github.com/fsnotify/fsnotify v1.9.0 //gomodjail:unconfined
 	github.com/go-viper/mapstructure/v2 v2.2.1
 	github.com/ipfs/go-cid v0.5.0
@@ -58,16 +58,16 @@ require (
 	github.com/rootless-containers/rootlesskit/v2 v2.3.5 //gomodjail:unconfined
 	github.com/spf13/cobra v1.9.1 //gomodjail:unconfined
 	github.com/spf13/pflag v1.0.6 //gomodjail:unconfined
-	github.com/vishvananda/netlink v1.3.1-0.20250303224720-0e7078ed04c8 //gomodjail:unconfined
+	github.com/vishvananda/netlink v1.3.1 //gomodjail:unconfined
 	github.com/vishvananda/netns v0.0.5 //gomodjail:unconfined
 	github.com/yuchanns/srslog v1.1.0
 	go.uber.org/mock v0.5.2
-	golang.org/x/crypto v0.38.0
-	golang.org/x/net v0.40.0
-	golang.org/x/sync v0.14.0 //gomodjail:unconfined
+	golang.org/x/crypto v0.39.0
+	golang.org/x/net v0.41.0
+	golang.org/x/sync v0.15.0 //gomodjail:unconfined
 	golang.org/x/sys v0.33.0 //gomodjail:unconfined
 	golang.org/x/term v0.32.0 //gomodjail:unconfined
-	golang.org/x/text v0.25.0
+	golang.org/x/text v0.26.0
 	gopkg.in/yaml.v3 v3.0.1
 	gotest.tools/v3 v3.5.2
 	tags.cncf.io/container-device-interface v1.0.1 //gomodjail:unconfined
@@ -75,7 +75,6 @@ require (
 
 require (
 	github.com/Azure/go-ansiterm v0.0.0-20250102033503-faa5f7b0171c // indirect
-	github.com/bmizerany/assert v0.0.0-20160611221934-b7ed37b82869 // indirect
 	github.com/cilium/ebpf v0.16.0 // indirect
 	github.com/containerd/errdefs/pkg v0.3.0 // indirect
 	github.com/containerd/go-runc v1.1.0 // indirect
@@ -116,7 +115,7 @@ require (
 	github.com/opencontainers/runtime-tools v0.9.1-0.20221107090550-2e043c6bd626 // indirect
 	github.com/opencontainers/selinux v1.12.0 // indirect
 	github.com/petermattis/goid v0.0.0-20240813172612-4fcff4a6cae7 // indirect
-	github.com/philhofer/fwd v1.1.3-0.20240612014219-fbbf4953d986 // indirect
+	github.com/philhofer/fwd v1.1.3-0.20240916144458-20a13a1f6b7c // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/sasha-s/go-deadlock v0.3.5 // indirect
 	//gomodjail:unconfined
@@ -126,7 +125,7 @@ require (
 	github.com/stefanberger/go-pkcs11uri v0.0.0-20230803200340-78284954bff6 // indirect
 	//gomodjail:unconfined
 	github.com/syndtr/gocapability v0.0.0-20200815063812-42c35b437635 // indirect
-	github.com/tinylib/msgp v1.2.0 // indirect
+	github.com/tinylib/msgp v1.3.0 // indirect
 	github.com/vbatts/tar-split v0.11.6 // indirect
 	github.com/xeipuuv/gojsonpointer v0.0.0-20190905194746-02993c407bfb // indirect
 	github.com/xeipuuv/gojsonreference v0.0.0-20180127040603-bd5ef7bd5415 // indirect
@@ -139,7 +138,7 @@ require (
 	go.opentelemetry.io/otel/metric v1.35.0 // indirect
 	go.opentelemetry.io/otel/trace v1.35.0 // indirect
 	golang.org/x/exp v0.0.0-20241108190413-2d47ceb2692f // indirect
-	golang.org/x/mod v0.24.0 // indirect
+	golang.org/x/mod v0.25.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20250218202821-56aae31c358a // indirect
 	//gomodjail:unconfined
 	google.golang.org/grpc v1.72.0 // indirect

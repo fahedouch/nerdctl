@@ -17,7 +17,7 @@
 
 # Basic deps
 # @BINARY: the binary checksums are verified via Dockerfile.d/SHA256SUMS.d/<COMPONENT>-<VERSION>
-ARG CONTAINERD_VERSION=v2.1.0@061792f0ecf3684fb30a3a0eb006799b8c6638a7
+ARG CONTAINERD_VERSION=v2.1.1@cb1076646aa3740577fafbf3d914198b7fe8e3f7
 ARG RUNC_VERSION=v1.3.0@4ca628d1d4c974f92d24daccb901aa078aad748e
 ARG CNI_PLUGINS_VERSION=v1.7.1@BINARY
 
@@ -34,11 +34,11 @@ ARG SLIRP4NETNS_VERSION=v1.3.2@BINARY
 ARG BYPASS4NETNS_VERSION=v0.4.2@aa04bd3dcc48c6dae6d7327ba219bda8fe2a4634
 # Extra deps: FUSE-OverlayFS
 ARG FUSE_OVERLAYFS_VERSION=v1.15@BINARY
-ARG CONTAINERD_FUSE_OVERLAYFS_VERSION=v2.1.5@BINARY
+ARG CONTAINERD_FUSE_OVERLAYFS_VERSION=v2.1.6@BINARY
 # Extra deps: Init
 ARG TINI_VERSION=v0.19.0@BINARY
 # Extra deps: Debug
-ARG BUILDG_VERSION=v0.5.2@BINARY
+ARG BUILDG_VERSION=v0.5.3@BINARY
 # Extra deps: gomodjail
 ARG GOMODJAIL_VERSION=v0.1.2@0a86b34442a491fa8f5e4565e9c846fce310239c
 
@@ -55,11 +55,14 @@ ARG KUBO_VERSION=v0.34.1
 FROM --platform=$BUILDPLATFORM tonistiigi/xx:1.6.1@sha256:923441d7c25f1e2eb5789f82d987693c47b8ed987c4ab3b075d6ed2b5d6779a3 AS xx
 
 
-FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-bookworm AS build-base-debian
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-bookworm AS build-base
 COPY --from=xx / /
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update -qq && apt-get install -qq --no-install-recommends \
+  make \
   git \
+  jq \
+  curl \
   dpkg-dev
 ARG TARGETARCH
 # libbtrfs: for containerd
@@ -73,11 +76,12 @@ RUN xx-apt-get update -qq && xx-apt-get install -qq --no-install-recommends \
   pkg-config
 RUN git config --global advice.detachedHead false
 ADD hack/git-checkout-tag-with-hash.sh /usr/local/bin/
+ADD hack/scripts/lib.sh /usr/local/bin/http::helper
 
-FROM build-base-debian AS build-containerd
+FROM build-base AS build-containerd
 ARG TARGETARCH
 ARG CONTAINERD_VERSION
-RUN git clone --quiet --depth 1 --branch "${CONTAINERD_VERSION%@*}" https://github.com/containerd/containerd.git /go/src/github.com/containerd/containerd
+RUN git clone --quiet --depth 1 --branch "${CONTAINERD_VERSION%%@*}" https://github.com/containerd/containerd.git /go/src/github.com/containerd/containerd
 WORKDIR /go/src/github.com/containerd/containerd
 RUN git-checkout-tag-with-hash.sh ${CONTAINERD_VERSION} && \
   mkdir -p /out /out/$TARGETARCH && \
@@ -85,10 +89,10 @@ RUN git-checkout-tag-with-hash.sh ${CONTAINERD_VERSION} && \
 RUN GO=xx-go make STATIC=1 && \
   cp -a bin/containerd bin/containerd-shim-runc-v2 bin/ctr /out/$TARGETARCH
 
-FROM build-base-debian AS build-runc
+FROM build-base AS build-runc
 ARG RUNC_VERSION
 ARG TARGETARCH
-RUN git clone --quiet --depth 1 --branch "${RUNC_VERSION%@*}" https://github.com/opencontainers/runc.git /go/src/github.com/opencontainers/runc
+RUN git clone --quiet --depth 1 --branch "${RUNC_VERSION%%@*}" https://github.com/opencontainers/runc.git /go/src/github.com/opencontainers/runc
 WORKDIR /go/src/github.com/opencontainers/runc
 RUN git-checkout-tag-with-hash.sh ${RUNC_VERSION} && \
   mkdir -p /out
@@ -96,10 +100,10 @@ ENV CGO_ENABLED=1
 RUN GO=xx-go CC=$(xx-info)-gcc STRIP=$(xx-info)-strip make static && \
   xx-verify --static runc && cp -v -a runc /out/runc.${TARGETARCH}
 
-FROM build-base-debian AS build-bypass4netns
+FROM build-base AS build-bypass4netns
 ARG BYPASS4NETNS_VERSION
 ARG TARGETARCH
-RUN git clone --quiet --depth 1 --branch "${BYPASS4NETNS_VERSION%@*}" https://github.com/rootless-containers/bypass4netns.git /go/src/github.com/rootless-containers/bypass4netns
+RUN git clone --quiet --depth 1 --branch "${BYPASS4NETNS_VERSION%%@*}" https://github.com/rootless-containers/bypass4netns.git /go/src/github.com/rootless-containers/bypass4netns
 WORKDIR /go/src/github.com/rootless-containers/bypass4netns
 RUN git-checkout-tag-with-hash.sh ${BYPASS4NETNS_VERSION} && \
   mkdir -p /out/${TARGETARCH}
@@ -107,10 +111,20 @@ ENV CGO_ENABLED=1
 RUN GO=xx-go make static && \
   xx-verify --static bypass4netns && cp -a bypass4netns bypass4netnsd /out/${TARGETARCH}
 
-FROM build-base-debian AS build-kubo
+FROM build-base AS build-gomodjail
+ARG GOMODJAIL_VERSION
+ARG TARGETARCH
+RUN git clone --quiet --depth 1 --branch "${GOMODJAIL_VERSION%%@*}" https://github.com/AkihiroSuda/gomodjail.git /go/src/github.com/AkihiroSuda/gomodjail
+WORKDIR /go/src/github.com/AkihiroSuda/gomodjail
+RUN git-checkout-tag-with-hash.sh ${GOMODJAIL_VERSION} && \
+  mkdir -p /out/${TARGETARCH}
+RUN GO=xx-go make STATIC=1 && \
+  xx-verify --static _output/bin/gomodjail && cp -a _output/bin/gomodjail /out/${TARGETARCH}
+
+FROM build-base AS build-kubo
 ARG KUBO_VERSION
 ARG TARGETARCH
-RUN git clone --quiet --depth 1 --branch "${KUBO_VERSION%@*}" https://github.com/ipfs/kubo.git /go/src/github.com/ipfs/kubo
+RUN git clone --quiet --depth 1 --branch "${KUBO_VERSION%%@*}" https://github.com/ipfs/kubo.git /go/src/github.com/ipfs/kubo
 WORKDIR /go/src/github.com/ipfs/kubo
 RUN git-checkout-tag-with-hash.sh ${KUBO_VERSION} && \
   mkdir -p /out/${TARGETARCH}
@@ -118,11 +132,6 @@ ENV CGO_ENABLED=0
 RUN xx-go --wrap && \
   make build && \
   xx-verify --static cmd/ipfs/ipfs && cp -a cmd/ipfs/ipfs /out/${TARGETARCH}
-
-FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS build-base
-RUN apk add --no-cache make git curl
-RUN git config --global advice.detachedHead false
-ADD hack/git-checkout-tag-with-hash.sh /usr/local/bin/
 
 FROM build-base AS build-minimal
 RUN BINDIR=/out/bin make binaries install
@@ -138,12 +147,12 @@ RUN mkdir -p /out/share/doc/nerdctl-full && touch /out/share/doc/nerdctl-full/RE
 ARG CONTAINERD_VERSION
 COPY --from=build-containerd /out/${TARGETARCH:-amd64}/* /out/bin/
 COPY --from=build-containerd /out/containerd.service /out/lib/systemd/system/containerd.service
-RUN echo "- containerd: ${CONTAINERD_VERSION/@*}" >> /out/share/doc/nerdctl-full/README.md
+RUN echo "- containerd: ${CONTAINERD_VERSION%%@*}" >> /out/share/doc/nerdctl-full/README.md
 ARG RUNC_VERSION
 COPY --from=build-runc /out/runc.${TARGETARCH:-amd64} /out/bin/runc
-RUN echo "- runc: ${RUNC_VERSION/@*}" >> /out/share/doc/nerdctl-full/README.md
+RUN echo "- runc: ${RUNC_VERSION%%@*}" >> /out/share/doc/nerdctl-full/README.md
 ARG CNI_PLUGINS_VERSION
-RUN CNI_PLUGINS_VERSION=${CNI_PLUGINS_VERSION/@BINARY}; \
+RUN CNI_PLUGINS_VERSION=${CNI_PLUGINS_VERSION%%@*}; \
   fname="cni-plugins-${TARGETOS:-linux}-${TARGETARCH:-amd64}-${CNI_PLUGINS_VERSION}.tgz" && \
   curl -o "${fname}" -fsSL --proto '=https' --tlsv1.2 "https://github.com/containernetworking/plugins/releases/download/${CNI_PLUGINS_VERSION}/${fname}" && \
   grep "${fname}" "/SHA256SUMS.d/cni-plugins-${CNI_PLUGINS_VERSION}" | sha256sum -c && \
@@ -152,7 +161,7 @@ RUN CNI_PLUGINS_VERSION=${CNI_PLUGINS_VERSION/@BINARY}; \
   rm -f "${fname}" && \
   echo "- CNI plugins: ${CNI_PLUGINS_VERSION}" >> /out/share/doc/nerdctl-full/README.md
 ARG BUILDKIT_VERSION
-RUN BUILDKIT_VERSION=${BUILDKIT_VERSION/@BINARY}; \
+RUN BUILDKIT_VERSION=${BUILDKIT_VERSION%%@*}; \
   fname="buildkit-${BUILDKIT_VERSION}.${TARGETOS:-linux}-${TARGETARCH:-amd64}.tar.gz" && \
   curl -o "${fname}" -fsSL --proto '=https' --tlsv1.2 "https://github.com/moby/buildkit/releases/download/${BUILDKIT_VERSION}/${fname}" && \
   grep "${fname}" "/SHA256SUMS.d/buildkit-${BUILDKIT_VERSION}" | sha256sum -c && \
@@ -167,10 +176,11 @@ RUN cd /out/lib/systemd/system && \
   echo "" >> buildkit.service && \
   echo "# This file was converted from containerd.service, with \`sed -E '${sedcomm}'\`" >> buildkit.service
 ARG STARGZ_SNAPSHOTTER_VERSION
-RUN STARGZ_SNAPSHOTTER_VERSION=${STARGZ_SNAPSHOTTER_VERSION/@BINARY}; \
+RUN --mount=type=secret,id=github_token,env=GITHUB_TOKEN \
+  STARGZ_SNAPSHOTTER_VERSION=${STARGZ_SNAPSHOTTER_VERSION%%@*}; \
   fname="stargz-snapshotter-${STARGZ_SNAPSHOTTER_VERSION}-${TARGETOS:-linux}-${TARGETARCH:-amd64}.tar.gz" && \
   curl -o "${fname}" -fsSL --proto '=https' --tlsv1.2 "https://github.com/containerd/stargz-snapshotter/releases/download/${STARGZ_SNAPSHOTTER_VERSION}/${fname}" && \
-  curl -o "stargz-snapshotter.service" -fsSL --proto '=https' --tlsv1.2 "https://raw.githubusercontent.com/containerd/stargz-snapshotter/${STARGZ_SNAPSHOTTER_VERSION}/script/config/etc/systemd/system/stargz-snapshotter.service" && \
+  http::helper github::file containerd/stargz-snapshotter script/config/etc/systemd/system/stargz-snapshotter.service "${STARGZ_SNAPSHOTTER_VERSION}" > "stargz-snapshotter.service" && \
   grep "${fname}" "/SHA256SUMS.d/stargz-snapshotter-${STARGZ_SNAPSHOTTER_VERSION}" | sha256sum -c - && \
   grep "stargz-snapshotter.service" "/SHA256SUMS.d/stargz-snapshotter-${STARGZ_SNAPSHOTTER_VERSION}" | sha256sum -c - && \
   tar xzf "${fname}" -C /out/bin && \
@@ -178,13 +188,13 @@ RUN STARGZ_SNAPSHOTTER_VERSION=${STARGZ_SNAPSHOTTER_VERSION/@BINARY}; \
   mv stargz-snapshotter.service /out/lib/systemd/system/stargz-snapshotter.service && \
   echo "- Stargz Snapshotter: ${STARGZ_SNAPSHOTTER_VERSION}" >> /out/share/doc/nerdctl-full/README.md
 ARG IMGCRYPT_VERSION
-RUN git clone --quiet --depth 1 --branch "${IMGCRYPT_VERSION%@*}" https://github.com/containerd/imgcrypt.git /go/src/github.com/containerd/imgcrypt && \
+RUN git clone --quiet --depth 1 --branch "${IMGCRYPT_VERSION%%@*}" https://github.com/containerd/imgcrypt.git /go/src/github.com/containerd/imgcrypt && \
   cd /go/src/github.com/containerd/imgcrypt && \
   git-checkout-tag-with-hash.sh "${IMGCRYPT_VERSION}" && \
   CGO_ENABLED=0 make && DESTDIR=/out make install && \
-  echo "- imgcrypt: ${IMGCRYPT_VERSION/@*}" >> /out/share/doc/nerdctl-full/README.md
+  echo "- imgcrypt: ${IMGCRYPT_VERSION%%@*}" >> /out/share/doc/nerdctl-full/README.md
 ARG SLIRP4NETNS_VERSION
-RUN SLIRP4NETNS_VERSION=${SLIRP4NETNS_VERSION/@BINARY}; \
+RUN SLIRP4NETNS_VERSION=${SLIRP4NETNS_VERSION%%@*}; \
   fname="slirp4netns-$(cat /target_uname_m)" && \
   curl -o "${fname}" -fsSL --proto '=https' --tlsv1.2 "https://github.com/rootless-containers/slirp4netns/releases/download/${SLIRP4NETNS_VERSION}/${fname}" && \
   grep "${fname}" "/SHA256SUMS.d/slirp4netns-${SLIRP4NETNS_VERSION}" | sha256sum -c && \
@@ -193,9 +203,9 @@ RUN SLIRP4NETNS_VERSION=${SLIRP4NETNS_VERSION/@BINARY}; \
   echo "- slirp4netns: ${SLIRP4NETNS_VERSION}" >> /out/share/doc/nerdctl-full/README.md
 ARG BYPASS4NETNS_VERSION
 COPY --from=build-bypass4netns /out/${TARGETARCH:-amd64}/* /out/bin/
-RUN echo "- bypass4netns: ${BYPASS4NETNS_VERSION/@*}" >> /out/share/doc/nerdctl-full/README.md
+RUN echo "- bypass4netns: ${BYPASS4NETNS_VERSION%%@*}" >> /out/share/doc/nerdctl-full/README.md
 ARG FUSE_OVERLAYFS_VERSION
-RUN FUSE_OVERLAYFS_VERSION=${FUSE_OVERLAYFS_VERSION/@BINARY}; \
+RUN FUSE_OVERLAYFS_VERSION=${FUSE_OVERLAYFS_VERSION%%@*}; \
   fname="fuse-overlayfs-$(cat /target_uname_m)" && \
   curl -o "${fname}" -fsSL --proto '=https' --tlsv1.2 "https://github.com/containers/fuse-overlayfs/releases/download/${FUSE_OVERLAYFS_VERSION}/${fname}" && \
   grep "${fname}" "/SHA256SUMS.d/fuse-overlayfs-${FUSE_OVERLAYFS_VERSION}" | sha256sum -c && \
@@ -203,22 +213,24 @@ RUN FUSE_OVERLAYFS_VERSION=${FUSE_OVERLAYFS_VERSION/@BINARY}; \
   chmod +x /out/bin/fuse-overlayfs && \
   echo "- fuse-overlayfs: ${FUSE_OVERLAYFS_VERSION}" >> /out/share/doc/nerdctl-full/README.md
 ARG CONTAINERD_FUSE_OVERLAYFS_VERSION
-RUN CONTAINERD_FUSE_OVERLAYFS_VERSION=${CONTAINERD_FUSE_OVERLAYFS_VERSION/@BINARY}; \
-  fname="containerd-fuse-overlayfs-${CONTAINERD_FUSE_OVERLAYFS_VERSION/v}-${TARGETOS:-linux}-${TARGETARCH:-amd64}.tar.gz" && \
+RUN CONTAINERD_FUSE_OVERLAYFS_VERSION=${CONTAINERD_FUSE_OVERLAYFS_VERSION%%@*}; \
+  fname="containerd-fuse-overlayfs-${CONTAINERD_FUSE_OVERLAYFS_VERSION##*v}-${TARGETOS:-linux}-${TARGETARCH:-amd64}.tar.gz" && \
   curl -o "${fname}" -fsSL --proto '=https' --tlsv1.2 "https://github.com/containerd/fuse-overlayfs-snapshotter/releases/download/${CONTAINERD_FUSE_OVERLAYFS_VERSION}/${fname}" && \
   grep "${fname}" "/SHA256SUMS.d/containerd-fuse-overlayfs-${CONTAINERD_FUSE_OVERLAYFS_VERSION}" | sha256sum -c && \
   tar xzf "${fname}" -C /out/bin && \
   rm -f "${fname}" && \
   echo "- containerd-fuse-overlayfs: ${CONTAINERD_FUSE_OVERLAYFS_VERSION}" >> /out/share/doc/nerdctl-full/README.md
 ARG TINI_VERSION
-RUN TINI_VERSION=${TINI_VERSION/@BINARY}; \
+RUN TINI_VERSION=${TINI_VERSION%%@*}; \
   fname="tini-static-${TARGETARCH:-amd64}" && \
   curl -o "${fname}" -fsSL --proto '=https' --tlsv1.2 "https://github.com/krallin/tini/releases/download/${TINI_VERSION}/${fname}" && \
   grep "${fname}" "/SHA256SUMS.d/tini-${TINI_VERSION}" | sha256sum -c && \
   cp -a "${fname}" /out/bin/tini && chmod +x /out/bin/tini && \
   echo "- Tini: ${TINI_VERSION}" >> /out/share/doc/nerdctl-full/README.md
 ARG BUILDG_VERSION
-RUN BUILDG_VERSION=${BUILDG_VERSION/@BINARY}; \
+# FIXME: this is a mildly-confusing approach. Buildkit will perform some "smart" replacement at build time and output
+# confusing debugging information, eg: BUILDG_VERSION will appear as if the original ARG value was used.
+RUN BUILDG_VERSION=${BUILDG_VERSION%%@*}; \
   fname="buildg-${BUILDG_VERSION}-${TARGETOS:-linux}-${TARGETARCH:-amd64}.tar.gz" && \
   curl -o "${fname}" -fsSL --proto '=https' --tlsv1.2 "https://github.com/ktock/buildg/releases/download/${BUILDG_VERSION}/${fname}" && \
   grep "${fname}" "/SHA256SUMS.d/buildg-${BUILDG_VERSION}" | sha256sum -c && \
@@ -226,7 +238,7 @@ RUN BUILDG_VERSION=${BUILDG_VERSION/@BINARY}; \
   rm -f "${fname}" && \
   echo "- buildg: ${BUILDG_VERSION}" >> /out/share/doc/nerdctl-full/README.md
 ARG ROOTLESSKIT_VERSION
-RUN ROOTLESSKIT_VERSION=${ROOTLESSKIT_VERSION/@BINARY}; \
+RUN ROOTLESSKIT_VERSION=${ROOTLESSKIT_VERSION%%@*}; \
   fname="rootlesskit-$(cat /target_uname_m).tar.gz" && \
   curl -o "${fname}" -fsSL --proto '=https' --tlsv1.2 "https://github.com/rootless-containers/rootlesskit/releases/download/${ROOTLESSKIT_VERSION}/${fname}" && \
   grep "${fname}" "/SHA256SUMS.d/rootlesskit-${ROOTLESSKIT_VERSION}" | sha256sum -c && \
@@ -234,19 +246,19 @@ RUN ROOTLESSKIT_VERSION=${ROOTLESSKIT_VERSION/@BINARY}; \
   rm -f "${fname}" /out/bin/rootlesskit-docker-proxy && \
   echo "- RootlessKit: ${ROOTLESSKIT_VERSION}" >> /out/share/doc/nerdctl-full/README.md
 ARG GOMODJAIL_VERSION
-RUN git clone https://github.com/AkihiroSuda/gomodjail.git /go/src/github.com/AkihiroSuda/gomodjail && \
-  cd /go/src/github.com/AkihiroSuda/gomodjail && \
-  git-checkout-tag-with-hash.sh "${GOMODJAIL_VERSION}" && \
-  make STATIC=1 && \
-  cp -a _output/bin/gomodjail /out/bin/ && \
-  echo "- gomodjail: ${GOMODJAIL_VERSION}" >> /out/share/doc/nerdctl-full/README.md
+COPY --from=build-gomodjail /out/${TARGETARCH:-amd64}/* /out/bin/
+RUN echo "- gomodjail: ${GOMODJAIL_VERSION}" >> /out/share/doc/nerdctl-full/README.md
+ARG CONTAINERIZED_SYSTEMD_VERSION
+RUN --mount=type=secret,id=github_token,env=GITHUB_TOKEN \
+  http::helper github::file AkihiroSuda/containerized-systemd docker-entrypoint.sh "${CONTAINERIZED_SYSTEMD_VERSION}" > /docker-entrypoint.sh && \
+  chmod +x /docker-entrypoint.sh
 
 RUN echo "" >> /out/share/doc/nerdctl-full/README.md && \
   echo "## License" >> /out/share/doc/nerdctl-full/README.md && \
-  echo "- bin/slirp4netns:    [GNU GENERAL PUBLIC LICENSE, Version 2](https://github.com/rootless-containers/slirp4netns/blob/${SLIRP4NETNS_VERSION/@*}/COPYING)" >> /out/share/doc/nerdctl-full/README.md && \
-  echo "- bin/fuse-overlayfs: [GNU GENERAL PUBLIC LICENSE, Version 2](https://github.com/containers/fuse-overlayfs/blob/${FUSE_OVERLAYFS_VERSION/@*}/COPYING)" >> /out/share/doc/nerdctl-full/README.md && \
+  echo "- bin/slirp4netns:    [GNU GENERAL PUBLIC LICENSE, Version 2](https://github.com/rootless-containers/slirp4netns/blob/${SLIRP4NETNS_VERSION%%@*}/COPYING)" >> /out/share/doc/nerdctl-full/README.md && \
+  echo "- bin/fuse-overlayfs: [GNU GENERAL PUBLIC LICENSE, Version 2](https://github.com/containers/fuse-overlayfs/blob/${FUSE_OVERLAYFS_VERSION%%@*}/COPYING)" >> /out/share/doc/nerdctl-full/README.md && \
   echo "- bin/{runc,bypass4netns,bypass4netnsd}: Apache License 2.0, statically linked with libseccomp ([LGPL 2.1](https://github.com/seccomp/libseccomp/blob/main/LICENSE), source code available at https://github.com/seccomp/libseccomp/)" >> /out/share/doc/nerdctl-full/README.md && \
-  echo "- bin/tini: [MIT License](https://github.com/krallin/tini/blob/${TINI_VERSION/@*}/LICENSE)" >> /out/share/doc/nerdctl-full/README.md && \
+  echo "- bin/tini: [MIT License](https://github.com/krallin/tini/blob/${TINI_VERSION%%@*}/LICENSE)" >> /out/share/doc/nerdctl-full/README.md && \
   echo "- Other files: [Apache License 2.0](https://www.apache.org/licenses/LICENSE-2.0)" >> /out/share/doc/nerdctl-full/README.md
 
 FROM build-dependencies AS build-full
@@ -254,6 +266,8 @@ COPY . /go/src/github.com/containerd/nerdctl
 RUN { echo "# nerdctl (full distribution)"; echo "- nerdctl: $(cd /go/src/github.com/containerd/nerdctl && git describe --tags)"; cat /out/share/doc/nerdctl-full/README.md; } > /out/share/doc/nerdctl-full/README.md.new; mv /out/share/doc/nerdctl-full/README.md.new /out/share/doc/nerdctl-full/README.md
 WORKDIR /go/src/github.com/containerd/nerdctl
 RUN BINDIR=/out/bin make binaries install
+# FIXME: `gomodjail pack` depends on QEMU for non-native architecture
+# TODO: gomodjail should provide a plain shell script that utilizes `zip(1)` for packing the self-extract archive, without running `gomodjail pack`..
 RUN /out/bin/gomodjail pack --go-mod=/go/src/github.com/containerd/nerdctl/go.mod /out/bin/nerdctl && \
   cp -a nerdctl.gomodjail /out/bin/
 COPY README.md /out/share/doc/nerdctl/
@@ -274,9 +288,7 @@ RUN apt-get update -qq && apt-get install -qq -y --no-install-recommends \
   iproute2 iptables \
   dbus dbus-user-session systemd systemd-sysv \
   fuse3
-ARG CONTAINERIZED_SYSTEMD_VERSION
-RUN curl -o /docker-entrypoint.sh -fsSL --proto '=https' --tlsv1.2 https://raw.githubusercontent.com/AkihiroSuda/containerized-systemd/${CONTAINERIZED_SYSTEMD_VERSION}/docker-entrypoint.sh && \
-  chmod +x /docker-entrypoint.sh
+COPY --from=build-full /docker-entrypoint.sh /docker-entrypoint.sh
 COPY --from=out-full / /usr/local/
 RUN perl -pi -e 's/multi-user.target/docker-entrypoint.target/g' /usr/local/lib/systemd/system/*.service && \
   systemctl enable containerd buildkit stargz-snapshotter && \
@@ -302,7 +314,7 @@ RUN apt-get update -qq && apt-get install -qq --no-install-recommends \
   git \
   make
 # We wouldn't need this if Docker Hub could have "golang:${GO_VERSION}-ubuntu"
-COPY --from=build-base-debian /usr/local/go /usr/local/go
+COPY --from=build-base /usr/local/go /usr/local/go
 ARG TARGETARCH
 ENV PATH=/usr/local/go/bin:$PATH
 ARG GOTESTSUM_VERSION
