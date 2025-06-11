@@ -253,7 +253,7 @@ TAR_OWNER0_FLAGS=--owner=0 --group=0
 TAR_FLATTEN_FLAGS=--transform 's/.*\///g'
 
 define make_artifact_full_linux
-	$(DOCKER) build --output type=tar,dest=$(CURDIR)/_output/nerdctl-full-$(VERSION_TRIMMED)-linux-$(1).tar --target out-full --platform $(1) --build-arg GO_VERSION -f $(MAKEFILE_DIR)/Dockerfile $(MAKEFILE_DIR)
+	$(DOCKER) build --secret id=github_token,env=GITHUB_TOKEN --output type=tar,dest=$(CURDIR)/_output/nerdctl-full-$(VERSION_TRIMMED)-linux-$(1).tar --target out-full --platform $(1) --build-arg GO_VERSION -f $(MAKEFILE_DIR)/Dockerfile $(MAKEFILE_DIR)
 	gzip -9 $(CURDIR)/_output/nerdctl-full-$(VERSION_TRIMMED)-linux-$(1).tar
 endef
 
@@ -267,6 +267,9 @@ artifacts: clean
 
 	GOOS=linux GOARCH=arm GOARM=7 make -C $(CURDIR) -f $(MAKEFILE_DIR)/Makefile binaries
 	tar $(TAR_OWNER0_FLAGS) $(TAR_FLATTEN_FLAGS) -czvf $(CURDIR)/_output/nerdctl-$(VERSION_TRIMMED)-linux-arm-v7.tar.gz  $(CURDIR)/_output/nerdctl $(MAKEFILE_DIR)/extras/rootless/*
+
+	GOOS=linux GOARCH=loong64     make -C $(CURDIR) -f $(MAKEFILE_DIR)/Makefile binaries
+	tar $(TAR_OWNER0_FLAGS) $(TAR_FLATTEN_FLAGS) -czvf $(CURDIR)/_output/nerdctl-$(VERSION_TRIMMED)-linux-loong64.tar.gz   $(CURDIR)/_output/nerdctl $(MAKEFILE_DIR)/extras/rootless/*
 
 	GOOS=linux GOARCH=ppc64le     make -C $(CURDIR) -f $(MAKEFILE_DIR)/Makefile binaries
 	tar $(TAR_OWNER0_FLAGS) $(TAR_FLATTEN_FLAGS) -czvf $(CURDIR)/_output/nerdctl-$(VERSION_TRIMMED)-linux-ppc64le.tar.gz $(CURDIR)/_output/nerdctl $(MAKEFILE_DIR)/extras/rootless/*

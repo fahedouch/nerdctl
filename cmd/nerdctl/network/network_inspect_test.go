@@ -28,6 +28,7 @@ import (
 	"github.com/containerd/nerdctl/mod/tigron/expect"
 	"github.com/containerd/nerdctl/mod/tigron/require"
 	"github.com/containerd/nerdctl/mod/tigron/test"
+	"github.com/containerd/nerdctl/mod/tigron/tig"
 
 	"github.com/containerd/nerdctl/v2/pkg/inspecttypes/dockercompat"
 	"github.com/containerd/nerdctl/v2/pkg/testutil"
@@ -317,6 +318,61 @@ func TestNetworkInspect(t *testing.T) {
 						assert.Equal(t, 1, len(dc[0].Containers), "Expected a single container as per configuration, but got multiple.")
 						assert.Equal(t, data.Identifier("nginx-container-1"), dc[0].Containers[data.Labels().Get("nginx-container-1-id")].Name)
 					},
+				}
+			},
+		},
+		{
+			Description: "Display containers belonging to multiple networks in the output of nerdctl network inspect",
+			Setup: func(data test.Data, helpers test.Helpers) {
+				helpers.Ensure("network", "create", data.Identifier("network-1"))
+				helpers.Ensure("network", "create", data.Identifier("network-2"))
+
+				containerID := helpers.Capture("run", "-d", "--name", data.Identifier(), "--network", data.Identifier("network-1"), "--network", data.Identifier("network-2"), testutil.CommonImage, "sleep", nerdtest.Infinity)
+
+				data.Labels().Set("containerID", strings.Trim(containerID, "\n"))
+			},
+			Cleanup: func(data test.Data, helpers test.Helpers) {
+				helpers.Anyhow("rm", "-f", data.Identifier())
+				helpers.Anyhow("network", "remove", data.Identifier("network-1"))
+				helpers.Anyhow("network", "remove", data.Identifier("network-2"))
+			},
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				return helpers.Command("network", "inspect", data.Identifier("network-1"))
+			},
+			Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
+				return &test.Expected{
+					Output: expect.JSON([]dockercompat.Network{}, func(dc []dockercompat.Network, info string, t tig.T) {
+						assert.Equal(t, 1, len(dc), "Unexpectedly got multiple results\n"+info)
+						assert.Equal(t, dc[0].Name, data.Identifier("network-1"))
+						assert.Equal(t, 1, len(dc[0].Containers), "Expected a single container as per configuration, but got multiple.")
+						assert.Equal(t, data.Identifier(), dc[0].Containers[data.Labels().Get("containerID")].Name)
+					}),
+				}
+			},
+		},
+		{
+			Description: "Display only containers attached to the specific network",
+			Setup: func(data test.Data, helpers test.Helpers) {
+				helpers.Ensure("network", "create", data.Identifier("some-network"))
+				helpers.Ensure("network", "create", data.Identifier("some-network-as-well"))
+
+				helpers.Ensure("run", "-d", "--name", data.Identifier(), "--network", data.Identifier("some-network-as-well"), testutil.CommonImage, "sleep", nerdtest.Infinity)
+			},
+			Cleanup: func(data test.Data, helpers test.Helpers) {
+				helpers.Anyhow("rm", "-f", data.Identifier())
+				helpers.Anyhow("network", "remove", data.Identifier("some-network"))
+				helpers.Anyhow("network", "remove", data.Identifier("some-network-as-well"))
+			},
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				return helpers.Command("network", "inspect", data.Identifier("some-network"))
+			},
+			Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
+				return &test.Expected{
+					Output: expect.JSON([]dockercompat.Network{}, func(dc []dockercompat.Network, info string, t tig.T) {
+						assert.Equal(t, 1, len(dc), "Unexpectedly got multiple results\n"+info)
+						assert.Equal(t, dc[0].Name, data.Identifier("some-network"))
+						assert.Equal(t, 0, len(dc[0].Containers), "Expected no containers as per configuration, but got multiple.")
+					}),
 				}
 			},
 		},

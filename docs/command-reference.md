@@ -244,6 +244,7 @@ Security flags:
 - :whale: `--security-opt apparmor=<PROFILE>`: specify custom AppArmor profile
 - :whale: `--security-opt no-new-privileges`: disallow privilege escalation, e.g., setuid and file capabilities
 - :whale: `--security-opt systempaths=unconfined`: Turn off confinement for system paths (masked paths, read-only paths) for the container
+- :whale: `--security-opt writable-cgroups`: making the cgroups writeable
 - :nerd_face: `--security-opt privileged-without-host-devices`: Don't pass host devices to privileged containers
 - :whale: `--cap-add=<CAP>`: Add Linux capabilities
 - :whale: `--cap-drop=<CAP>`: Drop Linux capabilities
@@ -686,8 +687,9 @@ Usage: `nerdctl attach CONTAINER`
 Flags:
 
 - :whale: `--detach-keys`: Override the default detach keys
+- :whale: `--no-stdin`: Do not attach STDIN
 
-Unimplemented `docker attach` flags: `--no-stdin`, `--sig-proxy`
+Unimplemented `docker attach` flags: `--sig-proxy`
 
 ### :whale: nerdctl container prune
 
@@ -764,6 +766,7 @@ Flags:
 - :whale: `-m, --message`: Commit message
 - :whale: `-c, --change`: Apply Dockerfile instruction to the created image (supported directives: [CMD, ENTRYPOINT])
 - :whale: `-p, --pause`: Pause container during commit (default: true)
+- :nerd_face: `--compression`: Commit compression algorithm (supported values: zstd or gzip) (default: gzip) (zstd is generally better for compression ratio but might not be as widely supported)
 
 ## Image management
 

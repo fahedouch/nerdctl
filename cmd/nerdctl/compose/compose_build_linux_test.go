@@ -29,7 +29,7 @@ import (
 )
 
 func TestComposeBuild(t *testing.T) {
-	dockerfile := "FROM " + testutil.AlpineImage
+	dockerfile := "FROM " + testutil.CommonImage
 
 	testCase := nerdtest.Setup()
 
@@ -46,15 +46,11 @@ services:
   svc0:
     build: .
     image: %s
-    ports:
-    - 8080:80
     depends_on:
     - svc1
   svc1:
     build: .
     image: %s
-    ports:
-    - 8081:80
 `, imageSvc0, imageSvc1)
 
 		data.Temp().Save(dockerComposeYAML, "compose.yaml")

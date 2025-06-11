@@ -237,8 +237,6 @@ type ContainerCreateOptions struct {
 	// #endregion
 
 	// #region for metadata flags
-	// NameChanged specifies whether the name has been changed
-	NameChanged bool
 	// Name assign a name to the container
 	Name string
 	// Label set meta data on a container
@@ -385,7 +383,16 @@ type ContainerCommitOptions struct {
 	Change []string
 	// Pause container during commit
 	Pause bool
+	// Compression is set commit compression algorithm
+	Compression CompressionType
 }
+
+type CompressionType string
+
+const (
+	Zstd CompressionType = "zstd"
+	Gzip CompressionType = "gzip"
+)
 
 // ContainerDiffOptions specifies options for `nerdctl (container) diff`.
 type ContainerDiffOptions struct {
