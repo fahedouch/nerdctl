@@ -18,105 +18,101 @@ package builder
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
-	"reflect"
 	"runtime"
 	"testing"
 
 	specs "github.com/opencontainers/image-spec/specs-go/v1"
-	"go.uber.org/mock/gomock"
 	"gotest.tools/v3/assert"
 )
 
-type MockParse struct {
-	ctrl     *gomock.Controller
-	recorder *MockParseRecorder
+// fakePlatformParser is a hand-rolled test double for PlatformParser.
+// Tests assign the function fields to control behavior.
+type fakePlatformParser struct {
+	ParseFunc       func(platform string) (specs.Platform, error)
+	DefaultSpecFunc func() specs.Platform
 }
 
-type MockParseRecorder struct {
-	mock *MockParse
+func (f *fakePlatformParser) Parse(platform string) (specs.Platform, error) {
+	if f.ParseFunc == nil {
+		return specs.Platform{}, nil
+	}
+	return f.ParseFunc(platform)
 }
 
-func newMockParser(ctrl *gomock.Controller) *MockParse {
-	mock := &MockParse{ctrl: ctrl}
-	mock.recorder = &MockParseRecorder{mock}
-	return mock
-}
-
-func (m *MockParse) EXPECT() *MockParseRecorder {
-	return m.recorder
-}
-
-func (m *MockParse) Parse(platform string) (specs.Platform, error) {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "Parse")
-	ret0, _ := ret[0].(specs.Platform)
-	ret1, _ := ret[1].(error)
-	return ret0, ret1
-}
-
-func (m *MockParseRecorder) Parse(platform string) *gomock.Call {
-	m.mock.ctrl.T.Helper()
-	return m.mock.ctrl.RecordCallWithMethodType(m.mock, "Parse", reflect.TypeOf((*MockParse)(nil).Parse))
-}
-
-func (m *MockParse) DefaultSpec() specs.Platform {
-	m.ctrl.T.Helper()
-	ret := m.ctrl.Call(m, "DefaultSpec")
-	ret0, _ := ret[0].(specs.Platform)
-	return ret0
-}
-
-func (m *MockParseRecorder) DefaultSpec() *gomock.Call {
-	m.mock.ctrl.T.Helper()
-	return m.mock.ctrl.RecordCallWithMethodType(m.mock, "DefaultSpec", reflect.TypeOf((*MockParse)(nil).DefaultSpec))
+func (f *fakePlatformParser) DefaultSpec() specs.Platform {
+	if f.DefaultSpecFunc == nil {
+		return specs.Platform{}
+	}
+	return f.DefaultSpecFunc()
 }
 
 func TestIsMatchingRuntimePlatform(t *testing.T) {
 	t.Parallel()
 
 	testCases := []struct {
-		name string
-		mock func(*MockParse)
-		want bool
+		name   string
+		parser *fakePlatformParser
+		want   bool
 	}{
 		{
 			name: "Image is shareable when Runtime and build platform match for os, arch and variant",
-			mock: func(mockParser *MockParse) {
-				mockParser.EXPECT().Parse("test").Return(specs.Platform{OS: "mockOS", Architecture: "mockArch", Variant: "mockVariant"}, nil)
-				mockParser.EXPECT().DefaultSpec().Return(specs.Platform{OS: "mockOS", Architecture: "mockArch", Variant: "mockVariant"})
+			parser: &fakePlatformParser{
+				ParseFunc: func(string) (specs.Platform, error) {
+					return specs.Platform{OS: "mockOS", Architecture: "mockArch", Variant: "mockVariant"}, nil
+				},
+				DefaultSpecFunc: func() specs.Platform {
+					return specs.Platform{OS: "mockOS", Architecture: "mockArch", Variant: "mockVariant"}
+				},
 			},
 			want: true,
 		},
 		{
 			name: "Image is shareable when Runtime and build platform match for os, arch. Variant is not defined",
-			mock: func(mockParser *MockParse) {
-				mockParser.EXPECT().Parse("test").Return(specs.Platform{OS: "mockOS", Architecture: "mockArch", Variant: ""}, nil)
-				mockParser.EXPECT().DefaultSpec().Return(specs.Platform{OS: "mockOS", Architecture: "mockArch", Variant: "mockVariant"})
+			parser: &fakePlatformParser{
+				ParseFunc: func(string) (specs.Platform, error) {
+					return specs.Platform{OS: "mockOS", Architecture: "mockArch", Variant: ""}, nil
+				},
+				DefaultSpecFunc: func() specs.Platform {
+					return specs.Platform{OS: "mockOS", Architecture: "mockArch", Variant: "mockVariant"}
+				},
 			},
 			want: true,
 		},
 		{
 			name: "Image is not shareable when Runtime and build platform donot math OS",
-			mock: func(mockParser *MockParse) {
-				mockParser.EXPECT().Parse("test").Return(specs.Platform{OS: "OS", Architecture: "mockArch", Variant: ""}, nil)
-				mockParser.EXPECT().DefaultSpec().Return(specs.Platform{OS: "mockOS", Architecture: "mockArch", Variant: "mockVariant"})
+			parser: &fakePlatformParser{
+				ParseFunc: func(string) (specs.Platform, error) {
+					return specs.Platform{OS: "OS", Architecture: "mockArch", Variant: ""}, nil
+				},
+				DefaultSpecFunc: func() specs.Platform {
+					return specs.Platform{OS: "mockOS", Architecture: "mockArch", Variant: "mockVariant"}
+				},
 			},
 			want: false,
 		},
 		{
 			name: "Image is not shareable when Runtime and build platform donot math Arch",
-			mock: func(mockParser *MockParse) {
-				mockParser.EXPECT().Parse("test").Return(specs.Platform{OS: "mockOS", Architecture: "Arch", Variant: ""}, nil)
-				mockParser.EXPECT().DefaultSpec().Return(specs.Platform{OS: "mockOS", Architecture: "mockArch", Variant: "mockVariant"})
+			parser: &fakePlatformParser{
+				ParseFunc: func(string) (specs.Platform, error) {
+					return specs.Platform{OS: "mockOS", Architecture: "Arch", Variant: ""}, nil
+				},
+				DefaultSpecFunc: func() specs.Platform {
+					return specs.Platform{OS: "mockOS", Architecture: "mockArch", Variant: "mockVariant"}
+				},
 			},
 			want: false,
 		},
 		{
 			name: "Image is not shareable when Runtime and build platform donot math Variant",
-			mock: func(mockParser *MockParse) {
-				mockParser.EXPECT().Parse("test").Return(specs.Platform{OS: "mockOS", Architecture: "mockArch", Variant: "Variant"}, nil)
-				mockParser.EXPECT().DefaultSpec().Return(specs.Platform{OS: "mockOS", Architecture: "mockArch", Variant: "mockVariant"})
+			parser: &fakePlatformParser{
+				ParseFunc: func(string) (specs.Platform, error) {
+					return specs.Platform{OS: "mockOS", Architecture: "mockArch", Variant: "Variant"}, nil
+				},
+				DefaultSpecFunc: func() specs.Platform {
+					return specs.Platform{OS: "mockOS", Architecture: "mockArch", Variant: "mockVariant"}
+				},
 			},
 			want: false,
 		},
@@ -126,11 +122,7 @@ func TestIsMatchingRuntimePlatform(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-
-			ctrl := gomock.NewController(t)
-			mockParser := newMockParser(ctrl)
-			tc.mock(mockParser)
-			r := isMatchingRuntimePlatform("test", mockParser)
+			r := isMatchingRuntimePlatform("test", tc.parser)
 			assert.Equal(t, r, tc.want, tc.name)
 		})
 	}
@@ -141,7 +133,7 @@ func TestIsBuildPlatformDefault(t *testing.T) {
 
 	testCases := []struct {
 		name     string
-		mock     func(*MockParse)
+		parser   *fakePlatformParser
 		platform []string
 		want     bool
 	}{
@@ -153,18 +145,26 @@ func TestIsBuildPlatformDefault(t *testing.T) {
 		{
 			name:     "Image is shareable when Runtime and build platform match for os, arch and variant",
 			platform: []string{"test"},
-			mock: func(mockParser *MockParse) {
-				mockParser.EXPECT().Parse("test").Return(specs.Platform{OS: "mockOS", Architecture: "mockArch", Variant: "mockVariant"}, nil)
-				mockParser.EXPECT().DefaultSpec().Return(specs.Platform{OS: "mockOS", Architecture: "mockArch", Variant: "mockVariant"})
+			parser: &fakePlatformParser{
+				ParseFunc: func(string) (specs.Platform, error) {
+					return specs.Platform{OS: "mockOS", Architecture: "mockArch", Variant: "mockVariant"}, nil
+				},
+				DefaultSpecFunc: func() specs.Platform {
+					return specs.Platform{OS: "mockOS", Architecture: "mockArch", Variant: "mockVariant"}
+				},
 			},
 			want: true,
 		},
 		{
 			name:     "Image is not shareable when Runtime build platform dont match",
 			platform: []string{"test"},
-			mock: func(mockParser *MockParse) {
-				mockParser.EXPECT().Parse("test").Return(specs.Platform{OS: "OS", Architecture: "mockArch", Variant: "mockVariant"}, nil)
-				mockParser.EXPECT().DefaultSpec().Return(specs.Platform{OS: "mockOS", Architecture: "mockArch", Variant: "mockVariant"})
+			parser: &fakePlatformParser{
+				ParseFunc: func(string) (specs.Platform, error) {
+					return specs.Platform{OS: "OS", Architecture: "mockArch", Variant: "mockVariant"}, nil
+				},
+				DefaultSpecFunc: func() specs.Platform {
+					return specs.Platform{OS: "mockOS", Architecture: "mockArch", Variant: "mockVariant"}
+				},
 			},
 			want: false,
 		},
@@ -179,13 +179,11 @@ func TestIsBuildPlatformDefault(t *testing.T) {
 		tc := tc
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-
-			ctrl := gomock.NewController(t)
-			mockParser := newMockParser(ctrl)
-			if len(tc.platform) == 1 {
-				tc.mock(mockParser)
+			parser := tc.parser
+			if parser == nil {
+				parser = &fakePlatformParser{}
 			}
-			r := isBuildPlatformDefault(tc.platform, mockParser)
+			r := isBuildPlatformDefault(tc.platform, parser)
 			assert.Equal(t, r, tc.want, tc.name)
 		})
 	}
@@ -235,6 +233,102 @@ func TestParseBuildctlArgsForOCILayout(t *testing.T) {
 			}
 			assert.Equal(t, len(args), len(test.expectedArgs))
 			assert.DeepEqual(t, args, test.expectedArgs)
+		})
+	}
+}
+
+func TestGetEffectiveSourcePolicyFile(t *testing.T) {
+	// Cannot use t.Parallel() since subtests modify environment variables
+
+	tests := []struct {
+		name        string
+		optionValue string
+		envValue    string
+		expected    string
+	}{
+		{
+			name:        "option value takes precedence over env var",
+			optionValue: "/path/from/flag.json",
+			envValue:    "/path/from/env.json",
+			expected:    "/path/from/flag.json",
+		},
+		{
+			name:        "env var is used when option is empty",
+			optionValue: "",
+			envValue:    "/path/from/env.json",
+			expected:    "/path/from/env.json",
+		},
+		{
+			name:        "empty when both are unset",
+			optionValue: "",
+			envValue:    "",
+			expected:    "",
+		},
+		{
+			name:        "option value used when env var is empty",
+			optionValue: "/path/from/flag.json",
+			envValue:    "",
+			expected:    "/path/from/flag.json",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Set up the environment variable for this test
+			t.Setenv("EXPERIMENTAL_BUILDKIT_SOURCE_POLICY", tc.envValue)
+
+			result := GetEffectiveSourcePolicyFile(tc.optionValue)
+			assert.Equal(t, result, tc.expected)
+		})
+	}
+}
+
+func TestGetDigestFromMetaFile(t *testing.T) {
+	t.Parallel()
+
+	const digest = "sha256:e2c8f34a2e73f9e11c93de402b9797adf95bab1e5ffb845b2cbe18f0e19dd0f1"
+
+	tests := []struct {
+		name     string
+		content  string
+		expected string
+		wantErr  bool
+	}{
+		{
+			name:     "digest present",
+			content:  fmt.Sprintf(`{"containerimage.digest": %q}`, digest),
+			expected: digest,
+		},
+		{
+			name:    "digest missing",
+			content: `{"containerimage.config.digest": "whatever"}`,
+			wantErr: true,
+		},
+		{
+			name:    "invalid json",
+			content: `{`,
+			wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			path := filepath.Join(t.TempDir(), "meta.json")
+			assert.NilError(t, os.WriteFile(path, []byte(tc.content), 0o600))
+
+			id, err := getDigestFromMetaFile(path)
+			if tc.wantErr {
+				assert.Assert(t, err != nil)
+			} else {
+				assert.NilError(t, err)
+				assert.Equal(t, id, tc.expected)
+			}
+
+			// The metadata file is a temporary file, and must be removed once read.
+			_, err = os.Stat(path)
+			assert.Assert(t, os.IsNotExist(err))
 		})
 	}
 }

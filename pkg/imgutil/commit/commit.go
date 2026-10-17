@@ -27,6 +27,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/klauspost/compress/zstd"
 	"github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/identity"
 	"github.com/opencontainers/image-spec/specs-go"
@@ -43,6 +44,9 @@ import (
 	"github.com/containerd/errdefs"
 	"github.com/containerd/log"
 	"github.com/containerd/platforms"
+	"github.com/containerd/stargz-snapshotter/estargz"
+	estargzconvert "github.com/containerd/stargz-snapshotter/nativeconverter/estargz"
+	zstdchunkedconvert "github.com/containerd/stargz-snapshotter/nativeconverter/zstdchunked"
 
 	"github.com/containerd/nerdctl/v2/pkg/api/types"
 	"github.com/containerd/nerdctl/v2/pkg/clientutil"
@@ -57,11 +61,18 @@ type Changes struct {
 }
 
 type Opts struct {
-	Author  string
-	Message string
-	Ref     string
-	Pause   bool
-	Changes Changes
+	Author      string
+	Message     string
+	Ref         string
+	Pause       bool
+	Changes     Changes
+	Compression types.CompressionType
+	Format      types.ImageFormat
+	// Timeout is the maximum duration for the commit operation (lease expiration).
+	// Defaults to 1 hour. Set to 0 to use containerd's default (24h).
+	Timeout time.Duration
+	types.EstargzOptions
+	types.ZstdChunkedOptions
 }
 
 var (
@@ -166,8 +177,16 @@ func Commit(ctx context.Context, client *containerd.Client, container containerd
 		sn     = client.SnapshotService(snName)
 	)
 
-	// Don't gc me and clean the dirty data after 1 hour!
-	ctx, done, err := client.WithLease(ctx, leases.WithRandomID(), leases.WithExpiration(1*time.Hour))
+	// Set lease expiration based on the configured timeout.
+	// The CLI flag defaults to 1h for backward compatibility.
+	// Set --timeout=0 to use containerd's default lease expiration (24h).
+	var done func(context.Context) error
+	if opts.Timeout <= 0 {
+		// Use containerd's default lease expiration (24h) by passing no opts.
+		ctx, done, err = client.WithLease(ctx)
+	} else {
+		ctx, done, err = client.WithLease(ctx, leases.WithRandomID(), leases.WithExpiration(opts.Timeout))
+	}
 	if err != nil {
 		return emptyDigest, fmt.Errorf("failed to create lease for commit: %w", err)
 	}
@@ -176,7 +195,10 @@ func Commit(ctx context.Context, client *containerd.Client, container containerd
 	// Sync filesystem to make sure that all the data writes in container could be persisted to disk.
 	Sync()
 
-	diffLayerDesc, diffID, err := createDiff(ctx, id, sn, client.ContentStore(), differ)
+	if opts.ZstdChunked {
+		opts.Compression = types.Zstd
+	}
+	diffLayerDesc, diffID, err := createDiff(ctx, id, sn, client.ContentStore(), differ, opts.Compression, opts)
 	if err != nil {
 		return emptyDigest, fmt.Errorf("failed to export layer: %w", err)
 	}
@@ -191,7 +213,7 @@ func Commit(ctx context.Context, client *containerd.Client, container containerd
 		return emptyDigest, fmt.Errorf("failed to apply diff: %w", err)
 	}
 
-	commitManifestDesc, configDigest, err := writeContentsForImage(ctx, snName, baseImg, imageConfig, diffLayerDesc)
+	commitManifestDesc, configDigest, err := writeContentsForImage(ctx, snName, baseImg, imageConfig, diffLayerDesc, opts)
 	if err != nil {
 		return emptyDigest, err
 	}
@@ -286,14 +308,29 @@ func generateCommitImageConfig(ctx context.Context, container containerd.Contain
 }
 
 // writeContentsForImage will commit oci image config and manifest into containerd's content store.
-func writeContentsForImage(ctx context.Context, snName string, baseImg containerd.Image, newConfig ocispec.Image, diffLayerDesc ocispec.Descriptor) (ocispec.Descriptor, digest.Digest, error) {
+func writeContentsForImage(ctx context.Context, snName string, baseImg containerd.Image, newConfig ocispec.Image, diffLayerDesc ocispec.Descriptor, opts *Opts) (ocispec.Descriptor, digest.Digest, error) {
 	newConfigJSON, err := json.Marshal(newConfig)
 	if err != nil {
 		return ocispec.Descriptor{}, emptyDigest, err
 	}
 
+	// Select media types based on format choice
+	var configMediaType, manifestMediaType string
+	switch opts.Format {
+	case types.ImageFormatOCI:
+		configMediaType = ocispec.MediaTypeImageConfig
+		manifestMediaType = ocispec.MediaTypeImageManifest
+	case types.ImageFormatDocker:
+		configMediaType = images.MediaTypeDockerSchema2Config
+		manifestMediaType = images.MediaTypeDockerSchema2Manifest
+	default:
+		// Default to Docker Schema2 for compatibility
+		configMediaType = images.MediaTypeDockerSchema2Config
+		manifestMediaType = images.MediaTypeDockerSchema2Manifest
+	}
+
 	configDesc := ocispec.Descriptor{
-		MediaType: images.MediaTypeDockerSchema2Config,
+		MediaType: configMediaType,
 		Digest:    digest.FromBytes(newConfigJSON),
 		Size:      int64(len(newConfigJSON)),
 	}
@@ -309,7 +346,7 @@ func writeContentsForImage(ctx context.Context, snName string, baseImg container
 		MediaType string `json:"mediaType,omitempty"`
 		ocispec.Manifest
 	}{
-		MediaType: images.MediaTypeDockerSchema2Manifest,
+		MediaType: manifestMediaType,
 		Manifest: ocispec.Manifest{
 			Versioned: specs.Versioned{
 				SchemaVersion: 2,
@@ -325,7 +362,7 @@ func writeContentsForImage(ctx context.Context, snName string, baseImg container
 	}
 
 	newMfstDesc := ocispec.Descriptor{
-		MediaType: images.MediaTypeDockerSchema2Manifest,
+		MediaType: manifestMediaType,
 		Digest:    digest.FromBytes(newMfstJSON),
 		Size:      int64(len(newMfstJSON)),
 	}
@@ -356,8 +393,45 @@ func writeContentsForImage(ctx context.Context, snName string, baseImg container
 }
 
 // createDiff creates a layer diff into containerd's content store.
-func createDiff(ctx context.Context, name string, sn snapshots.Snapshotter, cs content.Store, comparer diff.Comparer) (ocispec.Descriptor, digest.Digest, error) {
-	newDesc, err := rootfs.CreateDiff(ctx, name, sn, comparer)
+func createDiff(ctx context.Context, name string, sn snapshots.Snapshotter, cs content.Store, comparer diff.Comparer, compression types.CompressionType, opts *Opts) (ocispec.Descriptor, digest.Digest, error) {
+	diffOpts := make([]diff.Opt, 0)
+	var mediaType string
+
+	// Select media type based on format and compression
+	switch opts.Format {
+	case types.ImageFormatOCI:
+		// Use OCI media types
+		switch compression {
+		case types.Zstd:
+			diffOpts = append(diffOpts, diff.WithMediaType(ocispec.MediaTypeImageLayerZstd))
+			mediaType = ocispec.MediaTypeImageLayerZstd
+		default:
+			diffOpts = append(diffOpts, diff.WithMediaType(ocispec.MediaTypeImageLayerGzip))
+			mediaType = ocispec.MediaTypeImageLayerGzip
+		}
+	case types.ImageFormatDocker:
+		// Use Docker Schema2 media types for compatibility
+		switch compression {
+		case types.Zstd:
+			diffOpts = append(diffOpts, diff.WithMediaType(ocispec.MediaTypeImageLayerZstd))
+			mediaType = images.MediaTypeDockerSchema2LayerZstd
+		default:
+			diffOpts = append(diffOpts, diff.WithMediaType(ocispec.MediaTypeImageLayerGzip))
+			mediaType = images.MediaTypeDockerSchema2LayerGzip
+		}
+	default:
+		// Default to Docker Schema2 media types for compatibility
+		switch compression {
+		case types.Zstd:
+			diffOpts = append(diffOpts, diff.WithMediaType(ocispec.MediaTypeImageLayerZstd))
+			mediaType = images.MediaTypeDockerSchema2LayerZstd
+		default:
+			diffOpts = append(diffOpts, diff.WithMediaType(ocispec.MediaTypeImageLayerGzip))
+			mediaType = images.MediaTypeDockerSchema2LayerGzip
+		}
+	}
+
+	newDesc, err := rootfs.CreateDiff(ctx, name, sn, comparer, diffOpts...)
 	if err != nil {
 		return ocispec.Descriptor{}, digest.Digest(""), err
 	}
@@ -377,8 +451,90 @@ func createDiff(ctx context.Context, name string, sn snapshots.Snapshotter, cs c
 		return ocispec.Descriptor{}, digest.Digest(""), err
 	}
 
+	// Convert to eStargz if requested
+	if opts.Estargz {
+		log.G(ctx).Infof("Converting diff layer to eStargz format")
+
+		esgzOpts := []estargz.Option{
+			estargz.WithCompressionLevel(opts.EstargzCompressionLevel),
+		}
+		if opts.EstargzChunkSize > 0 {
+			esgzOpts = append(esgzOpts, estargz.WithChunkSize(opts.EstargzChunkSize))
+		}
+		if opts.EstargzMinChunkSize > 0 {
+			esgzOpts = append(esgzOpts, estargz.WithMinChunkSize(opts.EstargzMinChunkSize))
+		}
+
+		convertFunc := estargzconvert.LayerConvertFunc(esgzOpts...)
+
+		esgzDesc, err := convertFunc(ctx, cs, newDesc)
+		if err != nil {
+			return ocispec.Descriptor{}, digest.Digest(""), fmt.Errorf("failed to convert diff layer to eStargz: %w", err)
+		} else if esgzDesc != nil {
+			esgzDesc.MediaType = mediaType
+			esgzInfo, err := cs.Info(ctx, esgzDesc.Digest)
+			if err != nil {
+				return ocispec.Descriptor{}, digest.Digest(""), err
+			}
+
+			esgzDiffIDStr, ok := esgzInfo.Labels["containerd.io/uncompressed"]
+			if !ok {
+				return ocispec.Descriptor{}, digest.Digest(""), fmt.Errorf("invalid differ response with no diffID")
+			}
+
+			esgzDiffID, err := digest.Parse(esgzDiffIDStr)
+			if err != nil {
+				return ocispec.Descriptor{}, digest.Digest(""), err
+			}
+			return ocispec.Descriptor{
+				MediaType:   esgzDesc.MediaType,
+				Digest:      esgzDesc.Digest,
+				Size:        esgzDesc.Size,
+				Annotations: esgzDesc.Annotations,
+			}, esgzDiffID, nil
+		}
+	}
+
+	// Convert to zstd:chunked if requested
+	if opts.ZstdChunked {
+		log.G(ctx).Infof("Converting diff layer to zstd:chunked format")
+
+		esgzOpts := []estargz.Option{
+			estargz.WithChunkSize(opts.ZstdChunkedChunkSize),
+		}
+
+		convertFunc := zstdchunkedconvert.LayerConvertFuncWithCompressionLevel(zstd.EncoderLevelFromZstd(opts.ZstdChunkedCompressionLevel), esgzOpts...)
+
+		zstdchunkedDesc, err := convertFunc(ctx, cs, newDesc)
+		if err != nil {
+			return ocispec.Descriptor{}, digest.Digest(""), fmt.Errorf("failed to convert diff layer to zstd:chunked: %w", err)
+		} else if zstdchunkedDesc != nil {
+			zstdchunkedDesc.MediaType = mediaType
+			zstdchunkedInfo, err := cs.Info(ctx, zstdchunkedDesc.Digest)
+			if err != nil {
+				return ocispec.Descriptor{}, digest.Digest(""), err
+			}
+
+			zstdchunkedDiffIDStr, ok := zstdchunkedInfo.Labels["containerd.io/uncompressed"]
+			if !ok {
+				return ocispec.Descriptor{}, digest.Digest(""), fmt.Errorf("invalid differ response with no diffID")
+			}
+
+			zstdchunkedDiffID, err := digest.Parse(zstdchunkedDiffIDStr)
+			if err != nil {
+				return ocispec.Descriptor{}, digest.Digest(""), err
+			}
+			return ocispec.Descriptor{
+				MediaType:   zstdchunkedDesc.MediaType,
+				Digest:      zstdchunkedDesc.Digest,
+				Size:        zstdchunkedDesc.Size,
+				Annotations: zstdchunkedDesc.Annotations,
+			}, zstdchunkedDiffID, nil
+		}
+	}
+
 	return ocispec.Descriptor{
-		MediaType: images.MediaTypeDockerSchema2LayerGzip,
+		MediaType: mediaType,
 		Digest:    newDesc.Digest,
 		Size:      info.Size,
 	}, diffID, nil

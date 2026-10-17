@@ -104,7 +104,6 @@ cmd_entrypoint_check() {
 	init
 	INFO "Checking RootlessKit functionality"
 	if ! rootlesskit \
-		--net=slirp4netns \
 		--disable-host-loopback \
 		--copy-up=/etc --copy-up=/run --copy-up=/var/lib \
 		true; then
@@ -113,7 +112,7 @@ cmd_entrypoint_check() {
 	fi
 
 	INFO "Checking cgroup v2"
-	controllers="/sys/fs/cgroup/user.slice/user-${id}.slice/user@${id}.service/cgroup.controllers"
+	controllers="/sys/fs/cgroup$(systemctl --user show --value --property=ControlGroup)/cgroup.controllers"
 	if [ ! -f "${controllers}" ]; then
 		WARNING "Enabling cgroup v2 is highly recommended, see https://rootlesscontaine.rs/getting-started/common/cgroup2/ "
 	else
@@ -404,6 +403,15 @@ cmd_entrypoint_install_fuse_overlayfs() {
 		  [proxy_plugins."fuse-overlayfs"]
 		    type = "snapshot"
 		    address = "${XDG_RUNTIME_DIR}/containerd-fuse-overlayfs.sock"
+		  [proxy_plugins."fuse-overlayfs".exports]
+		    root = "${XDG_DATA_HOME}/containerd-fuse-overlayfs/"
+			enable_remote_snapshot_annotations = "true"
+		[[plugins."io.containerd.transfer.v1.local".unpack_config]]
+			platform = "linux"
+			snapshotter = "fuse-overlayfs"
+		[[plugins."io.containerd.transfer.v1.local".unpack_config]]
+			platform = "linux"
+			snapshotter = "overlayfs"
 		###  END  ###
 	EOT
 	INFO "Set \`export CONTAINERD_SNAPSHOTTER=\"fuse-overlayfs\"\` to use the fuse-overlayfs snapshotter."
@@ -449,6 +457,15 @@ cmd_entrypoint_install_stargz() {
 		  [proxy_plugins."stargz"]
 		    type = "snapshot"
 		    address = "${XDG_RUNTIME_DIR}/containerd-stargz-grpc/containerd-stargz-grpc.sock"
+		  [proxy_plugins.stargz.exports]
+		    root = "${XDG_DATA_HOME}/containerd-stargz-grpc/"
+		    enable_remote_snapshot_annotations = "true"
+		[[plugins."io.containerd.transfer.v1.local".unpack_config]]
+			platform = "linux"
+			snapshotter = "stargz"
+		[[plugins."io.containerd.transfer.v1.local".unpack_config]]
+			platform = "linux"
+			snapshotter = "overlayfs"
 		###  END  ###
 	EOT
 	INFO "Set \`export CONTAINERD_SNAPSHOTTER=\"stargz\"\` to use the stargz snapshotter."

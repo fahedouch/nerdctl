@@ -18,6 +18,7 @@ package image
 
 import (
 	"fmt"
+	"regexp"
 
 	"github.com/spf13/cobra"
 
@@ -33,11 +34,21 @@ func ImagesCommand() *cobra.Command {
 	shortHelp := "List images"
 	longHelp := shortHelp + `
 
-Properties:
+By default (Docker v29 compatible view) the following columns are shown:
+- IMAGE:        Image reference ("repository:tag", "repository@digest", or "<untagged>")
+- ID:           OCI digest of the image target (index/manifest), shared for multi-platform images. Matches Docker's ID with the containerd image store (differs from the legacy graphdriver image ID).
+- DISK USAGE:   Total on-disk size: content store blobs plus the unpacked snapshots
+- CONTENT SIZE: Size of the blobs (such as layer tarballs) in the content store
+- EXTRA:        Flags for the image; "U" means the image is in use by a container
+
+--tree expands multi-platform images: the same columns are shown, with an additional row per
+platform the image declares. Platforms that were never pulled are listed with zero sizes.
+
+Passing --format, --quiet, --no-trunc, --digests or --names falls back to the legacy table:
 - REPOSITORY: Repository
 - TAG:        Tag
 - NAME:       Name of the image, --names for skip parsing as repository and tag.
-- IMAGE ID:   OCI Digest. Usually different from Docker image ID. Shared for multi-platform images.
+- IMAGE ID:   OCI digest of the image target (index/manifest), shared for multi-platform images. Matches Docker's ID with the containerd image store (differs from the legacy graphdriver image ID).
 - CREATED:    Created time
 - PLATFORM:   Platform
 - SIZE:       Size of the unpacked snapshots
@@ -66,6 +77,7 @@ Properties:
 	cmd.Flags().Bool("digests", false, "Show digests (compatible with Docker, unlike ID)")
 	cmd.Flags().Bool("names", false, "Show image names")
 	cmd.Flags().BoolP("all", "a", true, "(unimplemented yet, always true)")
+	cmd.Flags().Bool("tree", false, "List multi-platform images as a tree (EXPERIMENTAL)")
 
 	return cmd
 }
@@ -81,7 +93,7 @@ func listOptions(cmd *cobra.Command, args []string) (*types.ImageListOptions, er
 		if err != nil {
 			return nil, err
 		}
-		filters = []string{fmt.Sprintf("name==%s", parsedReference)}
+		filters = nameFilterFor(parsedReference)
 	}
 	quiet, err := cmd.Flags().GetBool("quiet")
 	if err != nil {
@@ -110,7 +122,11 @@ func listOptions(cmd *cobra.Command, args []string) (*types.ImageListOptions, er
 	if err != nil {
 		return nil, err
 	}
-	return &types.ImageListOptions{
+	tree, err := cmd.Flags().GetBool("tree")
+	if err != nil {
+		return nil, err
+	}
+	options := &types.ImageListOptions{
 		GOptions:         globalOptions,
 		Quiet:            quiet,
 		NoTrunc:          noTrunc,
@@ -120,9 +136,33 @@ func listOptions(cmd *cobra.Command, args []string) (*types.ImageListOptions, er
 		Digests:          digests,
 		Names:            names,
 		All:              true,
+		Tree:             tree,
 		Stdout:           cmd.OutOrStdout(),
-	}, nil
+	}
+	// Validated here as well as in the logic layer, so that an invalid flag combination is
+	// reported before a containerd connection is attempted.
+	if err := image.ValidateListOptions(options); err != nil {
+		return nil, err
+	}
+	return options, nil
 
+}
+
+// nameFilterFor builds the containerd image-service filter(s) matching the
+// argument to `nerdctl image ls [REPOSITORY[:TAG]]`.
+//
+// If the argument named an explicit tag or digest, it's matched exactly.
+// Otherwise the argument was a bare repository name: referenceutil.Parse
+// normalizes that to an implicit ":latest" tag (matching how most other
+// reference-consuming commands resolve a bare name), but for listing
+// purposes that would incorrectly hide every other tag of the repository -
+// unlike `docker image ls`, which matches all tags of a bare repository
+// name. Match any tag under the repository instead.
+func nameFilterFor(parsedReference *referenceutil.ImageReference) []string {
+	if parsedReference.ExplicitTag != "" || parsedReference.Digest != "" {
+		return []string{fmt.Sprintf("name==%s", parsedReference)}
+	}
+	return []string{fmt.Sprintf("name~=^%s:", regexp.QuoteMeta(parsedReference.Name()))}
 }
 
 func imagesAction(cmd *cobra.Command, args []string) error {

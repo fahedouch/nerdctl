@@ -73,6 +73,20 @@ type BuilderBuildOptions struct {
 	Pull *bool
 	// ExtraHosts is a set of custom host-to-IP mappings.
 	ExtraHosts []string
+	// SourcePolicyFile is the path to a BuildKit source policy file.
+	// Passed through to buildctl as --source-policy-file.
+	SourcePolicyFile string
+}
+
+// BuilderDiskUsageOptions specifies options for querying the build cache disk usage.
+type BuilderDiskUsageOptions struct {
+	Stderr io.Writer
+	// GOptions is the global options
+	GOptions GlobalCommandOptions
+	// BuildKitHost is the buildkit host
+	BuildKitHost string
+	// Verbose requests the individual build cache records, not just the totals
+	Verbose bool
 }
 
 // BuilderPruneOptions specifies options for `nerdctl builder prune`.

@@ -17,22 +17,24 @@
 package nerdtest
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"testing"
 
 	"gotest.tools/v3/assert"
 
 	"github.com/containerd/nerdctl/mod/tigron/test"
+	"github.com/containerd/nerdctl/mod/tigron/tig"
 
+	"github.com/containerd/nerdctl/v2/pkg/internal/filesystem"
 	"github.com/containerd/nerdctl/v2/pkg/rootlessutil"
 	"github.com/containerd/nerdctl/v2/pkg/testutil"
 	"github.com/containerd/nerdctl/v2/pkg/testutil/nerdtest/platform"
 )
 
-const defaultNamespace = testutil.Namespace
+const defaultNamespace = "nerdctl-test"
 
 // IMPORTANT note on file writing here:
 // Inside the context of a single test, there is no concurrency, as setup, command and cleanup operate in sequence
@@ -48,7 +50,7 @@ func isTargetNerdish() bool {
 	return !strings.HasPrefix(filepath.Base(testutil.GetTarget()), "docker")
 }
 
-func newNerdCommand(conf test.Config, t *testing.T) *nerdCommand {
+func newNerdCommand(conf test.Config, t tig.T) *nerdCommand {
 	// Decide what binary we are running
 	var err error
 	var binary string
@@ -56,7 +58,8 @@ func newNerdCommand(conf test.Config, t *testing.T) *nerdCommand {
 
 	binary, err = exec.LookPath(trgt)
 	if err != nil {
-		t.Fatalf("unable to find binary %q: %v", trgt, err)
+		t.Log(fmt.Sprintf("unable to find binary %q: %v", trgt, err))
+		t.FailNow()
 	}
 
 	if isTargetNerdish() {
@@ -68,7 +71,8 @@ func newNerdCommand(conf test.Config, t *testing.T) *nerdCommand {
 		}
 	} else {
 		if err = exec.Command(binary, "compose", "version").Run(); err != nil {
-			t.Fatalf("docker does not support compose: %v", err)
+			t.Log(fmt.Sprintf("docker does not support compose: %v", err))
+			t.FailNow()
 		}
 	}
 
@@ -126,7 +130,7 @@ func (nc *nerdCommand) prep() {
 	if customDCConfig := nc.GenericCommand.Config.Read(DockerConfig); customDCConfig != "" {
 		if !nc.hasWrittenDockerConfig {
 			dest := filepath.Join(nc.Env["DOCKER_CONFIG"], "config.json")
-			err := os.WriteFile(dest, []byte(customDCConfig), test.FilePermissionsDefault)
+			err := filesystem.WriteFile(dest, []byte(customDCConfig), test.FilePermissionsDefault)
 			assert.NilError(nc.T(), err, "failed to write custom docker config json file for test")
 			nc.hasWrittenDockerConfig = true
 		}
@@ -175,7 +179,7 @@ func (nc *nerdCommand) prep() {
 	if nc.Config.Read(NerdctlToml) != "" {
 		if !nc.hasWrittenToml {
 			dest := nc.Env["NERDCTL_TOML"]
-			err := os.WriteFile(dest, []byte(nc.Config.Read(NerdctlToml)), test.FilePermissionsDefault)
+			err := filesystem.WriteFile(dest, []byte(nc.Config.Read(NerdctlToml)), test.FilePermissionsDefault)
 			assert.NilError(nc.T(), err, "failed to write NerdctlToml")
 			nc.hasWrittenToml = true
 		}

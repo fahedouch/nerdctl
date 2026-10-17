@@ -134,9 +134,8 @@ In addition to containerd, the following components should be installed:
   - v1.1.0 or later is highly recommended.
 - [BuildKit](https://github.com/moby/buildkit) (OPTIONAL): for using `nerdctl build`. BuildKit daemon (`buildkitd`) needs to be running. See also [the document about setting up BuildKit](./docs/build.md).
   - v0.11.0 or later is highly recommended. Some features, such as pruning caches with `nerdctl system prune`, do not work with older versions.
-- [RootlessKit](https://github.com/rootless-containers/rootlesskit) and [slirp4netns](https://github.com/rootless-containers/slirp4netns) (OPTIONAL): for [Rootless mode](./docs/rootless.md)
-  - RootlessKit needs to be v0.10.0 or later. v2.0.0 or later is recommended.
-  - slirp4netns needs to be v0.4.0 or later. v1.1.7 or later is recommended.
+- [RootlessKit](https://github.com/rootless-containers/rootlesskit) (OPTIONAL): for [Rootless mode](./docs/rootless.md)
+  - RootlessKit needs to be v0.10.0 or later. v3.0.0 or later is recommended.
 
 These dependencies are included in `nerdctl-full-<VERSION>-<OS>-<ARCH>.tar.gz`, but not included in `nerdctl-<VERSION>-<OS>-<ARCH>.tar.gz`.
 
@@ -160,14 +159,22 @@ $ limactl start
 $ lima nerdctl run -d --name nginx -p 127.0.0.1:8080:80 nginx:alpine
 ```
 
-### FreeBSD
-
-See [`./docs/freebsd.md`](docs/freebsd.md).
-
 ### Windows
+
+Install with [Scoop](https://scoop.sh):
+
+```
+scoop install nerdctl
+```
+
+Regarding compatibility, note that:
 
 - Linux containers: Known to work on WSL2
 - Windows containers: experimental support for Windows (see below for features that are currently known to work)
+
+### FreeBSD
+
+See [`./docs/freebsd.md`](docs/freebsd.md).
 
 ### Docker
 
@@ -219,7 +226,10 @@ Trivial:
 
 - Recursive read-only (RRO) bind-mount: `nerdctl run -v /mnt:/mnt:rro` (make children such as `/mnt/usb` to be read-only, too).
   Requires kernel >= 5.12.
-The same feature was later introduced in Docker v25 with a different syntax. nerdctl will support Docker v25 syntax too in the future.
+  The same feature was later introduced in Docker v25 with a different syntax: read-only mounts are now recursively read-only by default when supported,
+  and the behavior is customizable with `--mount type=bind,...,readonly,bind-recursive=<enabled|disabled|writable|readonly>`.
+  nerdctl now supports the Docker v25 syntax too, and the old `rro` syntax is deprecated.
+
 ## Similar tools
 
 - [`ctr`](https://github.com/containerd/containerd/tree/main/cmd/ctr): incompatible with Docker CLI, and not friendly to users.
@@ -287,6 +297,7 @@ Advanced features:
 
 - [`./docs/stargz.md`](./docs/stargz.md):     Lazy-pulling using Stargz Snapshotter
 - [`./docs/nydus.md`](./docs/nydus.md):       Lazy-pulling using Nydus Snapshotter
+- [`./docs/soci.md`](./docs/soci.md):         Lazy-pulling using SOCI Snapshotter
 - [`./docs/overlaybd.md`](./docs/overlaybd.md):       Lazy-pulling using OverlayBD Snapshotter
 - [`./docs/ocicrypt.md`](./docs/ocicrypt.md): Running encrypted images
 - [`./docs/gpu.md`](./docs/gpu.md):           Using GPUs inside containers

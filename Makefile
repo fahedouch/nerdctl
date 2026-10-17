@@ -27,6 +27,7 @@ DOCKER ?= docker
 GO ?= go
 GOOS ?= $(shell $(GO) env GOOS)
 GOARCH ?= $(shell $(GO) env GOARCH)
+GOHOSTOS ?= $(shell $(GO) env GOHOSTOS)
 ifeq ($(GOOS),windows)
 	BIN_EXT := .exe
 endif
@@ -45,6 +46,10 @@ REVISION ?= $(shell git -C $(MAKEFILE_DIR) rev-parse HEAD 2>/dev/null || echo no
 LINT_COMMIT_RANGE ?= main..HEAD
 GO_BUILD_LDFLAGS ?= -s -w
 GO_BUILD_FLAGS ?=
+GOSOCIALCHECK_FLAGS ?=
+
+BUILDTAGS ?=
+GO_TAGS=$(if $(BUILDTAGS),-tags "$(strip $(BUILDTAGS))",)
 
 ##########################
 # Helpers
@@ -54,7 +59,7 @@ ifdef VERBOSE
 	VERBOSE_FLAG_LONG := --verbose
 endif
 
-export GO_BUILD=CGO_ENABLED=0 GOOS=$(GOOS) $(GO) -C $(MAKEFILE_DIR) build -ldflags "$(GO_BUILD_LDFLAGS) $(VERBOSE_FLAG) -X $(PACKAGE)/pkg/version.Version=$(VERSION) -X $(PACKAGE)/pkg/version.Revision=$(REVISION)"
+export GO_BUILD=CGO_ENABLED=0 GOOS=$(GOOS) $(GO) -C $(MAKEFILE_DIR) build $(GO_TAGS) -ldflags "$(GO_BUILD_LDFLAGS) $(VERBOSE_FLAG) -X $(PACKAGE)/pkg/version.Version=$(VERSION) -X $(PACKAGE)/pkg/version.Revision=$(REVISION)"
 
 ifndef NO_COLOR
     NC := \033[0m
@@ -80,9 +85,9 @@ endef
 ##########################
 all: binaries
 
-lint: lint-go-all lint-yaml lint-shell lint-commits lint-mod lint-licenses-all
+lint: lint-go-all lint-yaml lint-shell lint-commits lint-mod lint-gomodjail-all lint-licenses-all
 
-fix: fix-mod fix-go-all
+fix: fix-mod fix-gomodjail fix-go-all
 
 # TODO: fix race task and add it
 test: test-unit # test-unit-race test-unit-bench
@@ -95,6 +100,7 @@ help:
 	@echo " * 'test' - Run basic unit testing."
 	@echo " * 'binaries' - Build nerdctl."
 	@echo " * 'install' - Install binaries to system locations."
+	@echo " * 'uninstall' - Remove installed binaries and documentation."
 	@echo " * 'clean' - Clean artifacts."
 
 ##########################
@@ -113,6 +119,14 @@ install:
 	install -D -m 755 $(MAKEFILE_DIR)/extras/rootless/containerd-rootless.sh $(DESTDIR)$(BINDIR)/containerd-rootless.sh
 	install -D -m 755 $(MAKEFILE_DIR)/extras/rootless/containerd-rootless-setuptool.sh $(DESTDIR)$(BINDIR)/containerd-rootless-setuptool.sh
 	install -D -m 644 -t $(DESTDIR)$(DOCDIR)/nerdctl $(MAKEFILE_DIR)/docs/*.md
+	$(call footer, $@)
+
+uninstall:
+	$(call title, $@)
+	rm -f $(DESTDIR)$(BINDIR)/$(BINARY)
+	rm -f $(DESTDIR)$(BINDIR)/containerd-rootless.sh
+	rm -f $(DESTDIR)$(BINDIR)/containerd-rootless-setuptool.sh
+	rm -rf $(DESTDIR)$(DOCDIR)/nerdctl
 	$(call footer, $@)
 
 clean:
@@ -163,16 +177,55 @@ lint-mod:
 		&& go mod tidy --diff
 	$(call footer, $@)
 
+# gomodjail statically verifies that the modules annotated `gomodjail:confined` in go.mod
+# cannot reach a denied capability (filesystem, network, exec, raw syscalls, ...).
+# https://github.com/AkihiroSuda/gomodjail
+lint-gomodjail:
+	$(call title, $@: $(GOOS)/$(GOARCH))
+ifeq ($(GOHOSTOS),windows)
+	@echo "Skipped: gomodjail does not support Windows hosts"
+else
+	@cd $(MAKEFILE_DIR) \
+		&& gomodjail analyze --goos=$(GOOS) --goarch=$(GOARCH) ./...
+endif
+	$(call footer, $@)
+
+# The confinement is only enforced for linux/amd64 and linux/arm64, as these are the only
+# platforms for which the gomodjail-packed binary is built (see Dockerfile), and the only
+# ones supported by the gomodjail dynamic mode. The verdicts are platform-dependent, hence
+# both architectures have to be analyzed.
+lint-gomodjail-all:
+	$(call title, $@)
+	@cd $(MAKEFILE_DIR) \
+		&& GOOS=linux GOARCH=amd64 make lint-gomodjail \
+		&& GOOS=linux GOARCH=arm64 make lint-gomodjail
+	$(call footer, $@)
+
+# gosocialcheck reports dependencies that do not appear to be adopted by a trusted project
+# (CNCF Graduated). Modules that are trusted anyway are annotated `gosocialcheck:trusted` in go.mod.
+# https://github.com/AkihiroSuda/gosocialcheck
+# Not part of `make lint`: the verdict is advisory, and CI runs it with GOSOCIALCHECK_FLAGS=--gha,
+# which reports findings as workflow annotations and always exits 0.
+lint-gosocialcheck:
+	$(call title, $@)
+	@cd $(MAKEFILE_DIR) \
+		&& gosocialcheck run $(GOSOCIALCHECK_FLAGS) ./...
+	$(call footer, $@)
+
 # FIXME: go-licenses cannot find LICENSE from root of repo when submodule is imported:
 # https://github.com/google/go-licenses/issues/186
 # This is impacting gotest.tools
 # FIXME: go-base36 is multi-license (MIT/Apache), using a custom boilerplate file that go-licenses fails to understand
+# filepath-securejoin is MPL-2.0, which is not in the allowed list, but is explicitly allowed by CNCF:
+# https://github.com/cncf/foundation/issues/1154
+# It is a transitive dependency (pulled in by go-selinux) that cannot currently be removed.
 lint-licenses:
 	$(call title, $@: $(GOOS))
 	@cd $(MAKEFILE_DIR) \
 		&& go-licenses check --include_tests --allowed_licenses=Apache-2.0,BSD-2-Clause,BSD-2-Clause-FreeBSD,BSD-3-Clause,MIT,ISC,Python-2.0,PostgreSQL,X11,Zlib \
 		  --ignore gotest.tools \
 		  --ignore github.com/multiformats/go-base36 \
+		  --ignore github.com/cyphar/filepath-securejoin \
 		  ./...
 	$(call footer, $@)
 
@@ -182,7 +235,7 @@ lint-licenses-all:
 		&& GOOS=linux make lint-licenses \
 		&& GOOS=windows make lint-licenses \
 		&& GOOS=freebsd make lint-licenses \
-		&& GOOS=darwin make lint-go
+		&& GOOS=darwin make lint-licenses
 	$(call footer, $@)
 
 ##########################
@@ -200,7 +253,7 @@ fix-go-all:
 		&& GOOS=linux make fix-go \
 		&& GOOS=windows make fix-go \
 		&& GOOS=freebsd make fix-go \
-		&& GOOS=darwin make lint-go
+		&& GOOS=darwin make fix-go
 	$(call footer, $@)
 
 fix-mod:
@@ -209,21 +262,44 @@ fix-mod:
 		&& go mod tidy
 	$(call footer, $@)
 
+# Downgrades the `gomodjail:confined` annotation of the modules that fail `make lint-gomodjail-all`
+# to `gomodjail:unconfined`, so that the annotations in go.mod stay reviewable.
+fix-gomodjail:
+	$(call title, $@)
+ifeq ($(GOHOSTOS),windows)
+	@echo "Skipped: gomodjail does not support Windows hosts"
+else
+	@cd $(MAKEFILE_DIR) \
+		&& gomodjail fix --goos=linux --goarch=amd64 ./... \
+		&& gomodjail fix --goos=linux --goarch=arm64 ./...
+endif
+	$(call footer, $@)
+
 ##########################
 # Development tools installation
 ##########################
 install-dev-tools:
 	$(call title, $@)
-	# golangci: v2.0.2 (2024-03-26)
-	# git-validation: main (2025-02-25)
-	# ltag: main (2025-03-04)
-	# go-licenses: v2.0.0-alpha.1 (2024-06-27)
+	# golangci: v2.14.0 (2026-09-24)
+	# git-validation: v1.2.2 (2025-02-26)
+	# ltag: v0.3.0 (2025-03-04)
+	# gotestsum: v1.13.0 (2025-09-11)
+	# go-licenses: v2.0.1 (2025-09-08)
+	# gosocialcheck: v0.2.0 (2026-09-11)
 	@cd $(MAKEFILE_DIR) \
-		&& go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@2b224c2cf4c9f261c22a16af7f8ca6408467f338 \
+	        && go install github.com/google/go-licenses/v2@3e084b0caf710f7bfead967567539214f598c0a2 \
+		&& go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@114493f9b3e7257d29e4130f2b4a4aadefbb6845 \
 		&& go install github.com/vbatts/git-validation@7b60e35b055dd2eab5844202ffffad51d9c93922 \
 		&& go install github.com/containerd/ltag@66e6a514664ee2d11a470735519fa22b1a9eaabd \
-		&& go install github.com/google/go-licenses/v2@d01822334fba5896920a060f762ea7ecdbd086e8 \
-		&& go install gotest.tools/gotestsum@ac6dad9c7d87b969004f7749d1942938526c9716
+		&& go install gotest.tools/gotestsum@c4a0df2e75a225d979a444342dd3db752b53619f \
+		&& go install github.com/AkihiroSuda/gosocialcheck/cmd/gosocialcheck@2c7caa6b92b1661a3a767cd8b768a49fc640016a
+	# gomodjail: v2.0.1 (2026-09-09)
+	# Not installed on Windows hosts: gomodjail does not build there, as its dynamic mode
+	# is compiled in unconditionally (https://github.com/AkihiroSuda/gomodjail)
+ifneq ($(GOHOSTOS),windows)
+	@cd $(MAKEFILE_DIR) \
+		&& go install github.com/AkihiroSuda/gomodjail/v2/cmd/gomodjail@5924a4079d0f70459a10973f715238dc336478ea
+endif
 	@echo "Remember to add \$$HOME/go/bin to your path"
 	$(call footer, $@)
 
@@ -253,7 +329,7 @@ TAR_OWNER0_FLAGS=--owner=0 --group=0
 TAR_FLATTEN_FLAGS=--transform 's/.*\///g'
 
 define make_artifact_full_linux
-	$(DOCKER) build --output type=tar,dest=$(CURDIR)/_output/nerdctl-full-$(VERSION_TRIMMED)-linux-$(1).tar --target out-full --platform $(1) --build-arg GO_VERSION -f $(MAKEFILE_DIR)/Dockerfile $(MAKEFILE_DIR)
+	$(DOCKER) build --secret id=github_token,env=GITHUB_TOKEN --output type=tar,dest=$(CURDIR)/_output/nerdctl-full-$(VERSION_TRIMMED)-linux-$(1).tar --target out-full --platform $(1) --build-arg GO_VERSION -f $(MAKEFILE_DIR)/Dockerfile $(MAKEFILE_DIR)
 	gzip -9 $(CURDIR)/_output/nerdctl-full-$(VERSION_TRIMMED)-linux-$(1).tar
 endef
 
@@ -267,6 +343,9 @@ artifacts: clean
 
 	GOOS=linux GOARCH=arm GOARM=7 make -C $(CURDIR) -f $(MAKEFILE_DIR)/Makefile binaries
 	tar $(TAR_OWNER0_FLAGS) $(TAR_FLATTEN_FLAGS) -czvf $(CURDIR)/_output/nerdctl-$(VERSION_TRIMMED)-linux-arm-v7.tar.gz  $(CURDIR)/_output/nerdctl $(MAKEFILE_DIR)/extras/rootless/*
+
+	GOOS=linux GOARCH=loong64     make -C $(CURDIR) -f $(MAKEFILE_DIR)/Makefile binaries
+	tar $(TAR_OWNER0_FLAGS) $(TAR_FLATTEN_FLAGS) -czvf $(CURDIR)/_output/nerdctl-$(VERSION_TRIMMED)-linux-loong64.tar.gz   $(CURDIR)/_output/nerdctl $(MAKEFILE_DIR)/extras/rootless/*
 
 	GOOS=linux GOARCH=ppc64le     make -C $(CURDIR) -f $(MAKEFILE_DIR)/Makefile binaries
 	tar $(TAR_OWNER0_FLAGS) $(TAR_FLATTEN_FLAGS) -czvf $(CURDIR)/_output/nerdctl-$(VERSION_TRIMMED)-linux-ppc64le.tar.gz $(CURDIR)/_output/nerdctl $(MAKEFILE_DIR)/extras/rootless/*
@@ -300,9 +379,10 @@ artifacts: clean
 	help \
 	binaries \
 	install \
+	uninstall \
 	clean \
-	lint-go lint-go-all lint-yaml lint-shell lint-commits lint-mod lint-licenses lint-licenses-all \
-	fix-go fix-go-all fix-mod \
+	lint-go lint-go-all lint-yaml lint-shell lint-commits lint-mod lint-gomodjail lint-gomodjail-all lint-gosocialcheck lint-licenses lint-licenses-all \
+	fix-go fix-go-all fix-mod fix-gomodjail \
 	install-dev-tools \
 	test-unit test-unit-race test-unit-bench \
 	artifacts

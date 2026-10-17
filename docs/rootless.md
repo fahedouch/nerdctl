@@ -73,6 +73,11 @@ Then, add the following config to `~/.config/containerd/config.toml`, and run `s
       type = "snapshot"
 # NOTE: replace "1000" with your actual UID
       address = "/run/user/1000/containerd-fuse-overlayfs.sock"
+
+# Optional: Configure fuse-overlayfs for image unpacking (allows automatic snapshotter selection)
+[[plugins."io.containerd.transfer.v1.local".unpack_config]]
+  platform = "linux"
+  snapshotter = "fuse-overlayfs"
 ```
 
 The snapshotter can be specified as `$CONTAINERD_SNAPSHOTTER`.
@@ -98,6 +103,11 @@ Then, add the following config to `~/.config/containerd/config.toml` and run `sy
       type = "snapshot"
 # NOTE: replace "1000" with your actual UID
       address = "/run/user/1000/containerd-stargz-grpc/containerd-stargz-grpc.sock"
+
+# Optional: Configure stargz for image unpacking (allows automatic snapshotter selection)
+[[plugins."io.containerd.transfer.v1.local".unpack_config]]
+  platform = "linux"
+  snapshotter = "stargz"
 ```
 
 The snapshotter can be specified as `$CONTAINERD_SNAPSHOTTER`.
@@ -143,9 +153,10 @@ More detail is available at [https://github.com/rootless-containers/bypass4netns
 Rootless containerd recognizes the following environment variables to configure the behavior of [RootlessKit](https://github.com/rootless-containers/rootlesskit):
 
 * `CONTAINERD_ROOTLESS_ROOTLESSKIT_STATE_DIR=DIR`: the rootlesskit state dir. Defaults to `$XDG_RUNTIME_DIR/containerd-rootless`.
-* `CONTAINERD_ROOTLESS_ROOTLESSKIT_NET=(slirp4netns|vpnkit|lxc-user-nic)`: the rootlesskit network driver. Defaults to "slirp4netns" if slirp4netns (>= v0.4.0) is installed. Otherwise defaults to "vpnkit".
-* `CONTAINERD_ROOTLESS_ROOTLESSKIT_MTU=NUM`: the MTU value for the rootlesskit network driver. Defaults to 65520 for slirp4netns, 1500 for other drivers.
-* `CONTAINERD_ROOTLESS_ROOTLESSKIT_PORT_DRIVER=(builtin|slirp4netns)`: the rootlesskit port driver. Defaults to "builtin" (this driver does not propagate the container's source IP address and always uses 127.0.0.1. Please check [Port Drivers](https://github.com/rootless-containers/rootlesskit/blob/master/docs/port.md#port-drivers) for more details).
+* `CONTAINERD_ROOTLESS_ROOTLESSKIT_NET=(slirp4netns|vpnkit|pasta|gvisor-tap-vsock|lxc-user-nic)`: the rootlesskit network driver. Defaults to "slirp4netns" if slirp4netns (>= v0.4.0) is installed. Otherwise defaults to "gvisor-tap-vsock".
+* `CONTAINERD_ROOTLESS_ROOTLESSKIT_MTU=NUM`: the MTU value for the rootlesskit network driver. Defaults to 65520 or 1500, depending on the network driver.
+* `CONTAINERD_ROOTLESS_ROOTLESSKIT_PORT_DRIVER=(builtin|slirp4netns|pesto|implicit|gvisor-tap-vsock)`: the rootlesskit port driver. Defaults to "builtin".
+  The "pesto" port driver (experimental, IPv4 only) requires the "pasta" network driver and passt `2026_05_07.1afd4ed` or later, which provides the "pesto" binary.
 * `CONTAINERD_ROOTLESS_ROOTLESSKIT_SLIRP4NETNS_SANDBOX=(auto|true|false)`: whether to protect slirp4netns with a dedicated mount namespace. Defaults to "auto".
 * `CONTAINERD_ROOTLESS_ROOTLESSKIT_SLIRP4NETNS_SECCOMP=(auto|true|false)`: whether to protect slirp4netns with seccomp. Defaults to "auto".
 * `CONTAINERD_ROOTLESS_ROOTLESSKIT_DETACH_NETNS=(auto|true|false)`: whether to launch rootlesskit with the "detach-netns" mode.
@@ -155,6 +166,12 @@ Rootless containerd recognizes the following environment variables to configure 
   the host loopback IP address (127.0.0.1) and abstract sockets are exposed to Dockerfile's "RUN" instructions during `nerdctl build` (not `nerdctl run`).
   The drawback is fixed in BuildKit v0.13. Upgrading from a prior version of BuildKit needs removing the old systemd unit:
   `containerd-rootless-setuptool.sh uninstall-buildkit && rm -f ~/.config/buildkit/buildkitd.toml`
+* `CONTAINERD_ROOTLESS_ROOTLESSKIT_IPV6=(true|false)`: whether to enable IPv6 inside the RootlessKit network namespace.
+  Defaults to "false". After enabling this, create IPv6-capable CNI networks with
+  `nerdctl network create --ipv6 --subnet <v6-subnet>` as usual. Note that this mainly
+  affects outgoing connections with `slirp4netns` and `pasta` network drivers.
+  It does not affect port forwarding in the built-in port driver.
+  The `gvisor-tap-vsock` network driver does not currently support IPv6.
 
 To set these variables, create `~/.config/systemd/user/containerd.service.d/override.conf` as follows:
 ```ini

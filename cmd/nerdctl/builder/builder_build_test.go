@@ -17,9 +17,10 @@
 package builder
 
 import (
-	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -29,6 +30,7 @@ import (
 	"github.com/containerd/nerdctl/mod/tigron/expect"
 	"github.com/containerd/nerdctl/mod/tigron/require"
 	"github.com/containerd/nerdctl/mod/tigron/test"
+	"github.com/containerd/nerdctl/mod/tigron/tig"
 
 	"github.com/containerd/nerdctl/v2/pkg/buildkitutil"
 	"github.com/containerd/nerdctl/v2/pkg/platformutil"
@@ -110,6 +112,7 @@ CMD ["echo", "nerdctl-build-test-string"]`, testutil.CommonImage)
 				},
 				Cleanup: func(data test.Data, helpers test.Helpers) {
 					helpers.Anyhow("rmi", "-f", data.Identifier("ignored"))
+					helpers.Anyhow("rmi", "-f", data.Identifier())
 				},
 				Expected: test.Expects(expect.ExitCodeGenericFail, nil, nil),
 			},
@@ -243,19 +246,23 @@ CMD ["echo", "nerdctl-build-test-stdin"]`, testutil.CommonImage)
 
 	testCase := &test.Case{
 		Require: nerdtest.Build,
+		Setup: func(data test.Data, helpers test.Helpers) {
+			cmd := helpers.Command("build", "-t", data.Identifier(), "-f", "-", ".")
+			cmd.Feed(strings.NewReader(dockerfile))
+			cmd.Run(&test.Expected{ExitCode: expect.ExitCodeSuccess})
+		},
 		Cleanup: func(data test.Data, helpers test.Helpers) {
 			helpers.Anyhow("rmi", "-f", data.Identifier())
 		},
+		// Run the image to prove that the build consumed the Dockerfile fed on stdin.
+		// Note: do not assert on the tag appearing in the build output: it is only
+		// printed on stderr ("naming to ...") when BuildKit exports directly to the
+		// containerd image store, not when nerdctl falls back to loading a tarball
+		// (eg: when the BuildKit worker snapshotter does not match the client one).
 		Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
-			cmd := helpers.Command("build", "-t", data.Identifier(), "-f", "-", ".")
-			cmd.Feed(strings.NewReader(dockerfile))
-			return cmd
+			return helpers.Command("run", "--rm", data.Identifier())
 		},
-		Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
-			return &test.Expected{
-				Errors: []error{errors.New(data.Identifier())},
-			}
-		},
+		Expected: test.Expects(expect.ExitCodeSuccess, nil, expect.Equals("nerdctl-build-test-stdin\n")),
 	}
 
 	testCase.Run(t)
@@ -339,7 +346,7 @@ COPY %s /`, testFileName)
 				},
 				Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
 					return &test.Expected{
-						Output: func(stdout, info string, t *testing.T) {
+						Output: func(stdout string, t tig.T) {
 							// Expecting testFileName to exist inside the output target directory
 							assert.Equal(t, data.Temp().Load(testFileName), testContent, "file content is identical")
 						},
@@ -353,7 +360,7 @@ COPY %s /`, testFileName)
 				},
 				Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
 					return &test.Expected{
-						Output: func(stdout, info string, t *testing.T) {
+						Output: func(stdout string, t tig.T) {
 							assert.Equal(t, data.Temp().Load(testFileName), testContent, "file content is identical")
 						},
 					}
@@ -492,6 +499,39 @@ CMD ["echo", "nerdctl-build-test-string"]
 		},
 		Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
 			return helpers.Command("run", "--rm", data.Temp().Load("id.txt"))
+		},
+
+		Expected: test.Expects(expect.ExitCodeSuccess, nil, expect.Equals("nerdctl-build-test-string\n")),
+	}
+
+	testCase.Run(t)
+}
+
+func TestBuildQuiet(t *testing.T) {
+	nerdtest.Setup()
+
+	dockerfile := fmt.Sprintf(`FROM %s
+CMD ["echo", "nerdctl-build-test-string"]
+	`, testutil.CommonImage)
+
+	testCase := &test.Case{
+		Require: nerdtest.Build,
+		Cleanup: func(data test.Data, helpers test.Helpers) {
+			helpers.Anyhow("rmi", "-f", data.Identifier())
+		},
+		Setup: func(data test.Data, helpers test.Helpers) {
+			data.Temp().Save(dockerfile, "Dockerfile")
+			// Regardless of whether the buildkit worker loads the image into the image store
+			// or not, `build -q` must print the image identifier on stdout.
+			// https://github.com/containerd/nerdctl/issues/2015
+			imageID := strings.TrimSpace(helpers.Capture("build", "-q", "-t", data.Identifier(), data.Temp().Path()))
+			assert.Assert(helpers.T(), regexp.MustCompile(`^sha256:[0-9a-f]{64}$`).MatchString(imageID),
+				"expected `build -q` to output a valid image ID, got %q", imageID)
+			data.Labels().Set("imageID", imageID)
+		},
+		Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+			// The image ID printed by `build -q` must be usable to run the built image.
+			return helpers.Command("run", "--rm", data.Labels().Get("imageID"))
 		},
 
 		Expected: test.Expects(expect.ExitCodeSuccess, nil, expect.Equals("nerdctl-build-test-string\n")),
@@ -662,8 +702,11 @@ CMD ["echo", "nerdctl-build-test-string"]
 			// XXX FIXME
 			helpers.Capture("build", data.Temp().Path())
 		},
-		Command:  test.Command("images"),
-		Expected: test.Expects(expect.ExitCodeSuccess, nil, expect.Contains("<none>")),
+		Command: test.Command("images", "--all"),
+		Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
+			// The Docker v29 default view renders untagged images as <untagged>.
+			return test.Expects(expect.ExitCodeSuccess, nil, expect.Contains("<untagged>"))(data, helpers)
+		},
 	}
 
 	testCase.Run(t)
@@ -850,8 +893,9 @@ RUN curl -I http://google.com
 func TestBuildAttestation(t *testing.T) {
 	nerdtest.Setup()
 
-	const testSBOMFileName = "sbom.spdx.json"
-	const testProvenanceFileName = "provenance.json"
+	// Using regex patterns to match SBOM and provenance files with optional platform suffix
+	const testSBOMFilePattern = `sbom\.spdx(?:\.[a-z0-9_]+)?\.json`
+	const testProvenanceFilePattern = `provenance(?:\.[a-z0-9_]+)?\.json`
 
 	dockerfile := fmt.Sprintf(`FROM %s`, testutil.CommonImage)
 
@@ -890,8 +934,18 @@ func TestBuildAttestation(t *testing.T) {
 				},
 				Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
 					return &test.Expected{
-						Output: func(stdout, info string, t *testing.T) {
-							data.Temp().Exists("dir-for-bom", testSBOMFileName)
+						Output: func(stdout string, t tig.T) {
+							files, err := os.ReadDir(data.Temp().Path("dir-for-bom"))
+							assert.NilError(t, err, "failed to read directory")
+
+							found := false
+							for _, file := range files {
+								if !file.IsDir() && regexp.MustCompile(testSBOMFilePattern).MatchString(file.Name()) {
+									found = true
+									break
+								}
+							}
+							assert.Assert(t, found, "no SBOM file matching pattern %s found", testSBOMFilePattern)
 						},
 					}
 				},
@@ -912,8 +966,18 @@ func TestBuildAttestation(t *testing.T) {
 				},
 				Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
 					return &test.Expected{
-						Output: func(stdout, info string, t *testing.T) {
-							data.Temp().Exists("dir-for-prov", testProvenanceFileName)
+						Output: func(stdout string, t tig.T) {
+							files, err := os.ReadDir(data.Temp().Path("dir-for-prov"))
+							assert.NilError(t, err, "failed to read directory")
+
+							found := false
+							for _, file := range files {
+								if !file.IsDir() && regexp.MustCompile(testProvenanceFilePattern).MatchString(file.Name()) {
+									found = true
+									break
+								}
+							}
+							assert.Assert(t, found, "no provenance file matching pattern %s found", testProvenanceFilePattern)
 						},
 					}
 				},
@@ -935,9 +999,29 @@ func TestBuildAttestation(t *testing.T) {
 				},
 				Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
 					return &test.Expected{
-						Output: func(stdout, info string, t *testing.T) {
-							data.Temp().Exists("dir-for-attest", testSBOMFileName)
-							data.Temp().Exists("dir-for-attest", testProvenanceFileName)
+						Output: func(stdout string, t tig.T) {
+							// Check if any file in the directory matches the SBOM file pattern
+							files, err := os.ReadDir(data.Temp().Path("dir-for-attest"))
+							assert.NilError(t, err, "failed to read directory")
+
+							sbomFound := false
+							for _, file := range files {
+								if !file.IsDir() && regexp.MustCompile(testSBOMFilePattern).MatchString(file.Name()) {
+									sbomFound = true
+									break
+								}
+							}
+							assert.Assert(t, sbomFound, "no SBOM file matching pattern %s found", testSBOMFilePattern)
+
+							// Check if any file in the directory matches the provenance file pattern
+							provenanceFound := false
+							for _, file := range files {
+								if !file.IsDir() && regexp.MustCompile(testProvenanceFilePattern).MatchString(file.Name()) {
+									provenanceFound = true
+									break
+								}
+							}
+							assert.Assert(t, provenanceFound, "no provenance file matching pattern %s found", testProvenanceFilePattern)
 						},
 					}
 				},
@@ -1000,7 +1084,7 @@ CMD ["echo", "nerdctl-build-test-string"]`, testutil.CommonImage)
 				Description: "build with buildkit-host",
 				Setup: func(data test.Data, helpers test.Helpers) {
 					// Get BuildkitAddr
-					buildkitAddr, err := buildkitutil.GetBuildkitHost(testutil.Namespace)
+					buildkitAddr, err := buildkitutil.GetBuildkitHost(string(helpers.Read(nerdtest.Namespace)))
 					assert.NilError(helpers.T(), err)
 					buildkitAddr = strings.TrimPrefix(buildkitAddr, "unix://")
 
@@ -1029,7 +1113,7 @@ CMD ["echo", "nerdctl-build-test-string"]`, testutil.CommonImage)
 				Description: "build with env specified",
 				Setup: func(data test.Data, helpers test.Helpers) {
 					// Get BuildkitAddr
-					buildkitAddr, err := buildkitutil.GetBuildkitHost(testutil.Namespace)
+					buildkitAddr, err := buildkitutil.GetBuildkitHost(string(helpers.Read(nerdtest.Namespace)))
 					assert.NilError(helpers.T(), err)
 					buildkitAddr = strings.TrimPrefix(buildkitAddr, "unix://")
 

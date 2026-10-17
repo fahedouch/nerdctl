@@ -32,14 +32,13 @@ import (
 	"github.com/opencontainers/go-digest"
 	"github.com/vishvananda/netlink"
 	"gotest.tools/v3/assert"
-	"gotest.tools/v3/icmd"
 
 	"github.com/containerd/containerd/v2/defaults"
 	"github.com/containerd/containerd/v2/pkg/netns"
-	"github.com/containerd/errdefs"
 	"github.com/containerd/nerdctl/mod/tigron/expect"
 	"github.com/containerd/nerdctl/mod/tigron/require"
 	"github.com/containerd/nerdctl/mod/tigron/test"
+	"github.com/containerd/nerdctl/mod/tigron/tig"
 
 	"github.com/containerd/nerdctl/v2/pkg/rootlessutil"
 	"github.com/containerd/nerdctl/v2/pkg/testutil"
@@ -64,314 +63,342 @@ func extractHostPort(portMapping string, port string) (string, error) {
 	return "", fmt.Errorf("could not extract host port from port mapping: %s", portMapping)
 }
 
-func valuesOfMapStringString(m map[string]string) map[string]struct{} {
-	res := make(map[string]struct{})
-	for _, v := range m {
-		res[v] = struct{}{}
-	}
-	return res
-}
-
 // TestRunInternetConnectivity tests Internet connectivity with `apk update`
 func TestRunInternetConnectivity(t *testing.T) {
-	base := testutil.NewBase(t)
-	customNet := testutil.Identifier(t)
-	base.Cmd("network", "create", customNet).AssertOK()
-	defer base.Cmd("network", "rm", customNet).Run()
+	testCase := nerdtest.Setup()
 
-	type testCase struct {
-		args []string
+	testCase.Setup = func(data test.Data, helpers test.Helpers) {
+		helpers.Ensure("network", "create", data.Identifier("customnet"))
+		netw := nerdtest.InspectNetwork(helpers, data.Identifier("customnet"))
+		data.Labels().Set("customNet", data.Identifier("customnet"))
+		data.Labels().Set("customNetID", netw.ID)
 	}
-	customNetID := base.InspectNetwork(customNet).ID
-	testCases := []testCase{
+
+	testCase.Cleanup = func(data test.Data, helpers test.Helpers) {
+		helpers.Anyhow("network", "rm", data.Identifier("customnet"))
+	}
+
+	testCase.SubTests = []*test.Case{
 		{
-			args: []string{"--net", "bridge"},
+			Description: "--net bridge",
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				return helpers.Command("run", "--rm", "--net", "bridge", testutil.AlpineImage, "apk", "update")
+			},
+			Expected: test.Expects(expect.ExitCodeSuccess, nil, expect.Contains("OK")),
 		},
 		{
-			args: []string{"--net", customNet},
+			Description: "--net customNet",
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				return helpers.Command("run", "--rm", "--net", data.Labels().Get("customNet"), testutil.AlpineImage, "apk", "update")
+			},
+			Expected: test.Expects(expect.ExitCodeSuccess, nil, expect.Contains("OK")),
 		},
 		{
-			args: []string{"--net", customNetID},
+			Description: "--net customNetID (full)",
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				return helpers.Command("run", "--rm", "--net", data.Labels().Get("customNetID"), testutil.AlpineImage, "apk", "update")
+			},
+			Expected: test.Expects(expect.ExitCodeSuccess, nil, expect.Contains("OK")),
 		},
 		{
-			args: []string{"--net", customNetID[:12]},
+			Description: "--net customNetID (short)",
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				return helpers.Command("run", "--rm", "--net", data.Labels().Get("customNetID")[:12], testutil.AlpineImage, "apk", "update")
+			},
+			Expected: test.Expects(expect.ExitCodeSuccess, nil, expect.Contains("OK")),
 		},
 		{
-			args: []string{"--net", "host"},
+			Description: "--net host",
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				return helpers.Command("run", "--rm", "--net", "host", testutil.AlpineImage, "apk", "update")
+			},
+			Expected: test.Expects(expect.ExitCodeSuccess, nil, expect.Contains("OK")),
 		},
 	}
-	for _, tc := range testCases {
-		tc := tc // IMPORTANT
-		name := "default"
-		if len(tc.args) > 0 {
-			name = strings.Join(tc.args, "_")
-		}
-		t.Run(name, func(t *testing.T) {
-			args := []string{"run", "--rm"}
-			args = append(args, tc.args...)
-			args = append(args, testutil.AlpineImage, "apk", "update")
-			cmd := base.Cmd(args...)
-			cmd.AssertOutContains("OK")
-		})
-	}
+
+	testCase.Run(t)
 }
 
 // TestRunHostLookup tests hostname lookup
 func TestRunHostLookup(t *testing.T) {
-	base := testutil.NewBase(t)
-	// key: container name, val: network name
-	m := map[string]string{
-		"c0-in-n0":     "n0",
-		"c1-in-n0":     "n0",
-		"c2-in-n1":     "n1",
-		"c3-in-bridge": "bridge",
-	}
-	customNets := valuesOfMapStringString(m)
-	defer func() {
-		for name := range m {
-			base.Cmd("rm", "-f", name).Run()
-		}
-		for netName := range customNets {
-			if netName == "bridge" {
-				continue
-			}
-			base.Cmd("network", "rm", netName).Run()
-		}
-	}()
+	testCase := nerdtest.Setup()
 
-	// Create networks
-	for netName := range customNets {
-		if netName == "bridge" {
-			continue
-		}
-		base.Cmd("network", "create", netName).AssertOK()
-	}
+	testCase.NoParallel = true
 
-	// Create nginx containers
-	for name, netName := range m {
-		cmd := base.Cmd("run",
-			"-d",
-			"--name", name,
-			"--hostname", name+"-foobar",
-			"--net", netName,
-			testutil.NginxAlpineImage,
-		)
-		t.Logf("creating host lookup testing container with command: %q", strings.Join(cmd.Command, " "))
-		cmd.AssertOK()
+	testCase.Setup = func(data test.Data, helpers test.Helpers) {
+		// key: container name suffix, val: network name
+		m := map[string]string{
+			"c0-in-n0":     data.Identifier("n0"),
+			"c1-in-n0":     data.Identifier("n0"),
+			"c2-in-n1":     data.Identifier("n1"),
+			"c3-in-bridge": "bridge",
+		}
+
+		// Create networks
+		helpers.Ensure("network", "create", data.Identifier("n0"))
+		helpers.Ensure("network", "create", data.Identifier("n1"))
+
+		// Store network and container names in labels
+		data.Labels().Set("net-n0", data.Identifier("n0"))
+		data.Labels().Set("net-n1", data.Identifier("n1"))
+
+		// Create nginx containers
+		for name, netName := range m {
+			containerName := data.Identifier(name)
+			data.Labels().Set(name, containerName)
+			helpers.Ensure("run", "-d", "--name", containerName, "--hostname", name+"-foobar", "--net", netName, testutil.NginxAlpineImage)
+		}
 	}
 
-	testWget := func(srcContainer, targetHostname string, expected bool) {
-		t.Logf("resolving %q in container %q (should success: %+v)", targetHostname, srcContainer, expected)
-		cmd := base.Cmd("exec", srcContainer, "wget", "-qO-", "http://"+targetHostname)
-		if expected {
-			cmd.AssertOutContains(testutil.NginxAlpineIndexHTMLSnippet)
+	testCase.Cleanup = func(data test.Data, helpers test.Helpers) {
+		for _, name := range []string{"c0-in-n0", "c1-in-n0", "c2-in-n1", "c3-in-bridge"} {
+			helpers.Anyhow("rm", "-f", data.Identifier(name))
+		}
+		helpers.Anyhow("network", "rm", data.Identifier("n0"))
+		helpers.Anyhow("network", "rm", data.Identifier("n1"))
+	}
+
+	type wgetCase struct {
+		srcSuffix     string
+		buildTarget   func(data test.Data) string
+		desc          string
+		shouldSucceed bool
+	}
+
+	wgetCases := []wgetCase{
+		{"c0-in-n0", func(d test.Data) string { return d.Labels().Get("c1-in-n0") }, "container name", true},
+		{"c0-in-n0", func(d test.Data) string { return d.Labels().Get("c1-in-n0") + "." + d.Labels().Get("net-n0") }, "container FQDN", true},
+		{"c0-in-n0", func(d test.Data) string { return "c1-in-n0-foobar" }, "hostname", true},
+		{"c0-in-n0", func(d test.Data) string { return "c1-in-n0-foobar." + d.Labels().Get("net-n0") }, "hostname FQDN", true},
+		{"c0-in-n0", func(d test.Data) string { return d.Labels().Get("c2-in-n1") }, "cross-network name", false},
+		{"c0-in-n0", func(d test.Data) string { return d.Labels().Get("c2-in-n1") + "." + d.Labels().Get("net-n1") }, "cross-network FQDN", false},
+		{"c0-in-n0", func(d test.Data) string { return d.Labels().Get("c3-in-bridge") }, "bridge container", false},
+		{"c1-in-n0", func(d test.Data) string { return d.Labels().Get("c0-in-n0") }, "reverse container name", true},
+		{"c1-in-n0", func(d test.Data) string { return d.Labels().Get("c0-in-n0") + "." + d.Labels().Get("net-n0") }, "reverse FQDN", true},
+		{"c1-in-n0", func(d test.Data) string { return "c0-in-n0-foobar" }, "reverse hostname", true},
+		{"c1-in-n0", func(d test.Data) string { return "c0-in-n0-foobar." + d.Labels().Get("net-n0") }, "reverse hostname FQDN", true},
+	}
+
+	testCase.SubTests = make([]*test.Case, 0, len(wgetCases))
+	for _, wc := range wgetCases {
+		wc := wc
+		desc := fmt.Sprintf("%s from %s (expect %v)", wc.desc, wc.srcSuffix, wc.shouldSucceed)
+		var expected test.Manager
+		if wc.shouldSucceed {
+			expected = test.Expects(expect.ExitCodeSuccess, nil, expect.Contains(testutil.NginxAlpineIndexHTMLSnippet))
 		} else {
-			cmd.AssertFail()
+			expected = test.Expects(expect.ExitCodeGenericFail, nil, nil)
 		}
+		testCase.SubTests = append(testCase.SubTests, &test.Case{
+			Description: desc,
+			NoParallel:  true,
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				target := wc.buildTarget(data)
+				return helpers.Command("exec", data.Labels().Get(wc.srcSuffix), "wget", "-qO-", "http://"+target)
+			},
+			Expected: expected,
+		})
 	}
 
-	// Tests begin
-	testWget("c0-in-n0", "c1-in-n0", true)
-	testWget("c0-in-n0", "c1-in-n0.n0", true)
-	testWget("c0-in-n0", "c1-in-n0-foobar", true)
-	testWget("c0-in-n0", "c1-in-n0-foobar.n0", true)
-	testWget("c0-in-n0", "c2-in-n1", false)
-	testWget("c0-in-n0", "c2-in-n1.n1", false)
-	testWget("c0-in-n0", "c3-in-bridge", false)
-	testWget("c1-in-n0", "c0-in-n0", true)
-	testWget("c1-in-n0", "c0-in-n0.n0", true)
-	testWget("c1-in-n0", "c0-in-n0-foobar", true)
-	testWget("c1-in-n0", "c0-in-n0-foobar.n0", true)
+	testCase.Run(t)
 }
 
 func TestRunPortWithNoHostPort(t *testing.T) {
-	if rootlessutil.IsRootless() {
-		t.Skip("Auto port assign is not supported rootless mode yet")
+	testCase := nerdtest.Setup()
+
+	testCase.Require = nerdtest.Rootful // Auto port assign is not supported rootless mode yet
+
+	type portTestCase struct {
+		containerPort string
+	}
+	testCases := []portTestCase{
+		{containerPort: "80"},
+		{containerPort: "80-81"},
+		{containerPort: "80-81/tcp"},
 	}
 
-	type testCase struct {
-		containerPort    string
-		runShouldSuccess bool
-	}
-	testCases := []testCase{
-		{
-			containerPort:    "80",
-			runShouldSuccess: true,
-		},
-		{
-			containerPort:    "80-81",
-			runShouldSuccess: true,
-		},
-		{
-			containerPort:    "80-81/tcp",
-			runShouldSuccess: true,
-		},
-	}
-	tID := testutil.Identifier(t)
 	for i, tc := range testCases {
-		i := i
 		tc := tc
-		tcName := fmt.Sprintf("%+v", tc)
-		t.Run(tcName, func(t *testing.T) {
-			testContainerName := fmt.Sprintf("%s-%d", tID, i)
-			base := testutil.NewBase(t)
-			defer base.Cmd("rm", "-f", testContainerName).Run()
-			pFlag := tc.containerPort
-			cmd := base.Cmd("run", "-d",
-				"--name", testContainerName,
-				"-p", pFlag,
-				testutil.NginxAlpineImage)
-			var result *icmd.Result
-			stdoutContent := ""
-			if tc.runShouldSuccess {
-				cmd.AssertOK()
-			} else {
-				cmd.AssertFail()
-				return
-			}
-			portCmd := base.Cmd("port", testContainerName)
-			portCmd.Base.T.Helper()
-			result = portCmd.Run()
-			stdoutContent = result.Stdout() + result.Stderr()
-			assert.Assert(cmd.Base.T, result.ExitCode == 0, stdoutContent)
-			regexExpression := regexp.MustCompile(`80\/tcp.*?->.*?0.0.0.0:(?P<portNumber>\d{1,5}).*?`)
-			match := regexExpression.FindStringSubmatch(stdoutContent)
-			paramsMap := make(map[string]string)
-			for i, name := range regexExpression.SubexpNames() {
-				if i > 0 && i <= len(match) {
-					paramsMap[name] = match[i]
+		i := i
+		testCase.SubTests = append(testCase.SubTests, &test.Case{
+			Description: fmt.Sprintf("port %s", tc.containerPort),
+			NoParallel:  true,
+			Setup: func(data test.Data, helpers test.Helpers) {
+				containerName := data.Identifier(fmt.Sprintf("container-%d", i))
+				data.Labels().Set("containerName", containerName)
+				helpers.Ensure("run", "-d", "--name", containerName, "-p", tc.containerPort, testutil.NginxAlpineImage)
+			},
+			Cleanup: func(data test.Data, helpers test.Helpers) {
+				helpers.Anyhow("rm", "-f", data.Identifier(fmt.Sprintf("container-%d", i)))
+			},
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				return helpers.Command("port", data.Labels().Get("containerName"))
+			},
+			Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
+				return &test.Expected{
+					Output: func(stdout string, t tig.T) {
+						regexExpression := regexp.MustCompile(`80\/tcp.*?->.*?0.0.0.0:(?P<portNumber>\d{1,5}).*?`)
+						match := regexExpression.FindStringSubmatch(stdout)
+						paramsMap := make(map[string]string)
+						for j, name := range regexExpression.SubexpNames() {
+							if j > 0 && j <= len(match) {
+								paramsMap[name] = match[j]
+							}
+						}
+						assert.Assert(t, paramsMap["portNumber"] != "", "could not extract port number from: %s", stdout)
+						connectURL := fmt.Sprintf("http://%s:%s", "127.0.0.1", paramsMap["portNumber"])
+						resp, err := nettestutil.HTTPGet(connectURL, 5, false)
+						assert.NilError(t, err)
+						respBody, err := io.ReadAll(resp.Body)
+						assert.NilError(t, err)
+						assert.Assert(t, strings.Contains(string(respBody), testutil.NginxAlpineIndexHTMLSnippet))
+					},
 				}
-			}
-			if _, ok := paramsMap["portNumber"]; !ok {
-				t.Fail()
-				return
-			}
-			connectURL := fmt.Sprintf("http://%s:%s", "127.0.0.1", paramsMap["portNumber"])
-			resp, err := nettestutil.HTTPGet(connectURL, 30, false)
-			assert.NilError(t, err)
-			respBody, err := io.ReadAll(resp.Body)
-			assert.NilError(t, err)
-			assert.Assert(t, strings.Contains(string(respBody), testutil.NginxAlpineIndexHTMLSnippet))
+			},
 		})
 	}
 
+	testCase.Run(t)
 }
 
 func TestUniqueHostPortAssignement(t *testing.T) {
-	if rootlessutil.IsRootless() {
-		t.Skip("Auto port assign is not supported rootless mode yet")
-	}
+	testCase := nerdtest.Setup()
 
-	type testCase struct {
-		containerPort    string
-		runShouldSuccess bool
-	}
+	testCase.Require = nerdtest.Rootful // Auto port assign is not supported rootless mode yet
 
-	testCases := []testCase{
-		{
-			containerPort:    "80",
-			runShouldSuccess: true,
-		},
-		{
-			containerPort:    "80-81",
-			runShouldSuccess: true,
-		},
-		{
-			containerPort:    "80-81/tcp",
-			runShouldSuccess: true,
-		},
+	type portTestCase struct {
+		containerPort string
 	}
-
-	tID := testutil.Identifier(t)
+	testCases := []portTestCase{
+		{containerPort: "80"},
+		{containerPort: "80-81"},
+		{containerPort: "80-81/tcp"},
+	}
 
 	for i, tc := range testCases {
-		i := i
 		tc := tc
-		tcName := fmt.Sprintf("%+v", tc)
-		t.Run(tcName, func(t *testing.T) {
-			testContainerName1 := fmt.Sprintf("%s-%d-1", tID, i)
-			testContainerName2 := fmt.Sprintf("%s-%d-2", tID, i)
-			base := testutil.NewBase(t)
-			defer base.Cmd("rm", "-f", testContainerName1, testContainerName2).Run()
+		i := i
+		testCase.SubTests = append(testCase.SubTests, &test.Case{
+			Description: fmt.Sprintf("port %s", tc.containerPort),
+			NoParallel:  true,
+			Setup: func(data test.Data, helpers test.Helpers) {
+				name1 := data.Identifier(fmt.Sprintf("c%d-1", i))
+				name2 := data.Identifier(fmt.Sprintf("c%d-2", i))
+				data.Labels().Set("container1", name1)
+				data.Labels().Set("container2", name2)
+				helpers.Ensure("run", "-d", "--name", name1, "-p", tc.containerPort, testutil.NginxAlpineImage)
+				helpers.Ensure("run", "-d", "--name", name2, "-p", tc.containerPort, testutil.NginxAlpineImage)
+			},
+			Cleanup: func(data test.Data, helpers test.Helpers) {
+				helpers.Anyhow("rm", "-f", data.Identifier(fmt.Sprintf("c%d-1", i)), data.Identifier(fmt.Sprintf("c%d-2", i)))
+			},
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				return helpers.Command("port", data.Labels().Get("container1"))
+			},
+			Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
+				return &test.Expected{
+					Output: func(stdout string, t tig.T) {
+						port1, err := extractHostPort(stdout, "80")
+						assert.NilError(t, err)
 
-			pFlag := tc.containerPort
-			cmd1 := base.Cmd("run", "-d",
-				"--name", testContainerName1, "-p",
-				pFlag,
-				testutil.NginxAlpineImage)
+						// Get port for second container
+						port2Stdout := helpers.Capture("port", data.Labels().Get("container2"))
+						port2, err := extractHostPort(port2Stdout, "80")
+						assert.NilError(t, err)
 
-			cmd2 := base.Cmd("run", "-d",
-				"--name", testContainerName2, "-p",
-				pFlag,
-				testutil.NginxAlpineImage)
-			var result *icmd.Result
-			stdoutContent := ""
-			if tc.runShouldSuccess {
-				cmd1.AssertOK()
-				cmd2.AssertOK()
-			} else {
-				cmd1.AssertFail()
-				cmd2.AssertFail()
-				return
-			}
-			portCmd1 := base.Cmd("port", testContainerName1)
-			portCmd2 := base.Cmd("port", testContainerName2)
-			portCmd1.Base.T.Helper()
-			portCmd2.Base.T.Helper()
-			result = portCmd1.Run()
-			stdoutContent = result.Stdout() + result.Stderr()
-			assert.Assert(t, result.ExitCode == 0, stdoutContent)
-			port1, err := extractHostPort(stdoutContent, "80")
-			assert.NilError(t, err)
-			result = portCmd2.Run()
-			stdoutContent = result.Stdout() + result.Stderr()
-			assert.Assert(t, result.ExitCode == 0, stdoutContent)
-			port2, err := extractHostPort(stdoutContent, "80")
-			assert.NilError(t, err)
-			assert.Assert(t, port1 != port2, "Host ports are not unique")
+						assert.Assert(t, port1 != port2, "Host ports are not unique")
 
-			// Make HTTP GET request to container 1
-			connectURL1 := fmt.Sprintf("http://%s:%s", "127.0.0.1", port1)
-			resp1, err := nettestutil.HTTPGet(connectURL1, 30, false)
-			assert.NilError(t, err)
-			respBody1, err := io.ReadAll(resp1.Body)
-			assert.NilError(t, err)
-			assert.Assert(t, strings.Contains(string(respBody1), testutil.NginxAlpineIndexHTMLSnippet))
+						// Make HTTP GET request to container 1
+						connectURL1 := fmt.Sprintf("http://%s:%s", "127.0.0.1", port1)
+						resp1, err := nettestutil.HTTPGet(connectURL1, 5, false)
+						assert.NilError(t, err)
+						respBody1, err := io.ReadAll(resp1.Body)
+						assert.NilError(t, err)
+						assert.Assert(t, strings.Contains(string(respBody1), testutil.NginxAlpineIndexHTMLSnippet))
 
-			// Make HTTP GET request to container 2
-			connectURL2 := fmt.Sprintf("http://%s:%s", "127.0.0.1", port2)
-			resp2, err := nettestutil.HTTPGet(connectURL2, 30, false)
-			assert.NilError(t, err)
-			respBody2, err := io.ReadAll(resp2.Body)
-			assert.NilError(t, err)
-			assert.Assert(t, strings.Contains(string(respBody2), testutil.NginxAlpineIndexHTMLSnippet))
+						// Make HTTP GET request to container 2
+						connectURL2 := fmt.Sprintf("http://%s:%s", "127.0.0.1", port2)
+						resp2, err := nettestutil.HTTPGet(connectURL2, 5, false)
+						assert.NilError(t, err)
+						respBody2, err := io.ReadAll(resp2.Body)
+						assert.NilError(t, err)
+						assert.Assert(t, strings.Contains(string(respBody2), testutil.NginxAlpineIndexHTMLSnippet))
+					},
+				}
+			},
 		})
 	}
+
+	testCase.Run(t)
+}
+
+func TestHostPortAlreadyInUse(t *testing.T) {
+	testCase := nerdtest.Setup()
+
+	testCase.NoParallel = true
+
+	type portConflictCase struct {
+		hostPort      string
+		containerPort string
+	}
+	testCases := []portConflictCase{
+		{hostPort: "5000", containerPort: "80/tcp"},
+		{hostPort: "5000", containerPort: "80/tcp"},
+		{hostPort: "5000", containerPort: "80/udp"},
+		{hostPort: "5000", containerPort: "80/sctp"},
+	}
+
+	for i, tc := range testCases {
+		tc := tc
+		i := i
+		subTest := &test.Case{
+			Description: fmt.Sprintf("%s:%s", tc.hostPort, tc.containerPort),
+			NoParallel:  true,
+			Setup: func(data test.Data, helpers test.Helpers) {
+				name1 := data.Identifier(fmt.Sprintf("c%d-1", i))
+				data.Labels().Set("container1", name1)
+				pFlag := fmt.Sprintf("%s:%s", tc.hostPort, tc.containerPort)
+				helpers.Ensure("run", "-d", "--name", name1, "-p", pFlag, testutil.NginxAlpineImage)
+			},
+			Cleanup: func(data test.Data, helpers test.Helpers) {
+				helpers.Anyhow("rm", "-f", data.Identifier(fmt.Sprintf("c%d-1", i)), data.Identifier(fmt.Sprintf("c%d-2", i)))
+			},
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				name2 := data.Identifier(fmt.Sprintf("c%d-2", i))
+				pFlag := fmt.Sprintf("%s:%s", tc.hostPort, tc.containerPort)
+				return helpers.Command("run", "-d", "--name", name2, "-p", pFlag, testutil.NginxAlpineImage)
+			},
+			Expected: test.Expects(expect.ExitCodeGenericFail, nil, nil),
+		}
+		if strings.Contains(tc.containerPort, "sctp") {
+			subTest.Require = nerdtest.Rootful
+		}
+		testCase.SubTests = append(testCase.SubTests, subTest)
+	}
+
+	testCase.Run(t)
 }
 
 func TestRunPort(t *testing.T) {
 	baseTestRunPort(t, testutil.NginxAlpineImage, testutil.NginxAlpineIndexHTMLSnippet, true)
 }
 
-func TestRunWithInvalidPortThenCleanUp(t *testing.T) {
+func TestRunWithManyPortsThenCleanUp(t *testing.T) {
 	testCase := nerdtest.Setup()
 	// docker does not set label restriction to 4096 bytes
 	testCase.Require = require.Not(nerdtest.Docker)
 
 	testCase.SubTests = []*test.Case{
 		{
-			Description: "Run a container with invalid ports, and then clean up.",
-			Cleanup: func(data test.Data, helpers test.Helpers) {
-				helpers.Anyhow("rm", "--data-root", data.Temp().Path(), "-f", data.Identifier())
-			},
+			Description: "Run a container with many ports, and then clean up.",
 			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
-				return helpers.Command("run", "--data-root", data.Temp().Path(), "--rm", "--name", data.Identifier(), "-p", "22200-22299:22200-22299", testutil.CommonImage)
+				return helpers.Command("run", "--data-root", data.Temp().Path(), "--rm", "-p", "22200-22299:22200-22299", testutil.CommonImage)
 			},
 			Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
 				return &test.Expected{
-					ExitCode: 1,
-					Errors:   []error{errdefs.ErrInvalidArgument},
-					Output: func(stdout string, info string, t *testing.T) {
+					ExitCode: 0,
+					Errors:   []error{},
+					Output: func(stdout string, t tig.T) {
 						getAddrHash := func(addr string) string {
 							const addrHashLen = 8
 
@@ -401,116 +428,167 @@ func TestRunWithInvalidPortThenCleanUp(t *testing.T) {
 }
 
 func TestRunContainerWithStaticIP(t *testing.T) {
-	if rootlessutil.IsRootless() {
-		t.Skip("Static IP assignment is not supported rootless mode yet.")
-	}
-	networkName := "test-network"
-	networkSubnet := "172.0.0.0/16"
-	base := testutil.NewBase(t)
-	cmd := base.Cmd("network", "create", networkName, "--subnet", networkSubnet)
-	cmd.AssertOK()
-	defer base.Cmd("network", "rm", networkName).Run()
-	testCases := []struct {
-		ip                string
-		shouldSuccess     bool
-		useNetwork        bool
-		checkTheIPAddress bool
-	}{
-		{
-			ip:                "172.0.0.2",
-			shouldSuccess:     true,
-			useNetwork:        true,
-			checkTheIPAddress: true,
-		},
-		{
-			ip:                "192.0.0.2",
-			shouldSuccess:     false,
-			useNetwork:        true,
-			checkTheIPAddress: false,
-		},
-		// XXX see https://github.com/containerd/nerdctl/issues/3101
-		// docker 24 silently ignored the ip - now, docker 26 is erroring out - furthermore, this ip only makes sense
-		// in the context of nerdctl bridge network, so, this test needs rewritting either way
-		/*
-			{
-				ip:                "10.4.0.2",
-				shouldSuccess:     true,
-				useNetwork:        false,
-				checkTheIPAddress: false,
-			},
-		*/
-	}
-	tID := testutil.Identifier(t)
-	for i, tc := range testCases {
-		i := i
-		tc := tc
-		tcName := fmt.Sprintf("%+v", tc)
-		t.Run(tcName, func(t *testing.T) {
-			testContainerName := fmt.Sprintf("%s-%d", tID, i)
-			base := testutil.NewBase(t)
-			defer base.Cmd("rm", "-f", testContainerName).Run()
-			args := []string{
-				"run", "-d", "--name", testContainerName,
-			}
-			if tc.useNetwork {
-				args = append(args, []string{"--network", networkName}...)
-			}
-			args = append(args, []string{"--ip", tc.ip, testutil.NginxAlpineImage}...)
-			cmd := base.Cmd(args...)
-			if !tc.shouldSuccess {
-				cmd.AssertFail()
-				return
-			}
-			cmd.AssertOK()
+	testCase := nerdtest.Setup()
 
-			if tc.checkTheIPAddress {
-				inspectCmd := base.Cmd("inspect", testContainerName, "--format", "\"{{range .NetworkSettings.Networks}} {{.IPAddress}}{{end}}\"")
-				result := inspectCmd.Run()
-				stdoutContent := result.Stdout() + result.Stderr()
-				assert.Assert(inspectCmd.Base.T, result.ExitCode == 0, stdoutContent)
-				if !strings.Contains(stdoutContent, tc.ip) {
-					t.Fail()
-					return
-				}
-			}
-		})
+	testCase.Require = nerdtest.Rootful // Static IP assignment is not supported rootless mode yet
+
+	testCase.Setup = func(data test.Data, helpers test.Helpers) {
+		data.Labels().Set("networkName", data.Identifier("network"))
+		helpers.Ensure("network", "create", data.Identifier("network"), "--subnet", "172.0.0.0/16")
 	}
+
+	testCase.Cleanup = func(data test.Data, helpers test.Helpers) {
+		helpers.Anyhow("network", "rm", data.Identifier("network"))
+	}
+
+	// XXX see https://github.com/containerd/nerdctl/issues/3101
+	// docker 24 silently ignored the ip - now, docker 26 is erroring out - furthermore, this ip only makes sense
+	// in the context of nerdctl bridge network, so, this test needs rewritting either way
+	testCase.SubTests = []*test.Case{
+		{
+			Description: "static IP within subnet succeeds",
+			NoParallel:  true,
+			Setup: func(data test.Data, helpers test.Helpers) {
+				data.Labels().Set("containerName", data.Identifier("static-ip"))
+				helpers.Ensure("run", "-d", "--name", data.Identifier("static-ip"), "--network", data.Labels().Get("networkName"), "--ip", "172.0.0.2", testutil.NginxAlpineImage)
+			},
+			Cleanup: func(data test.Data, helpers test.Helpers) {
+				helpers.Anyhow("rm", "-f", data.Identifier("static-ip"))
+			},
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				return helpers.Command("inspect", data.Labels().Get("containerName"),
+					"--format", "{{range .NetworkSettings.Networks}} {{.IPAddress}}{{end}}")
+			},
+			Expected: test.Expects(expect.ExitCodeSuccess, nil, expect.Contains("172.0.0.2")),
+		},
+		{
+			Description: "static IP outside subnet fails",
+			NoParallel:  true,
+			Cleanup: func(data test.Data, helpers test.Helpers) {
+				helpers.Anyhow("rm", "-f", data.Identifier("bad-ip"))
+			},
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				return helpers.Command("run", "-d", "--name", data.Identifier("bad-ip"),
+					"--network", data.Labels().Get("networkName"),
+					"--ip", "192.0.0.2", testutil.NginxAlpineImage)
+			},
+			Expected: test.Expects(expect.ExitCodeGenericFail, nil, nil),
+		},
+	}
+
+	testCase.Run(t)
 }
 
 func TestRunDNS(t *testing.T) {
-	base := testutil.NewBase(t)
+	testCase := nerdtest.Setup()
 
-	base.Cmd("run", "--rm", "--dns", "8.8.8.8", testutil.CommonImage,
-		"cat", "/etc/resolv.conf").AssertOutContains("nameserver 8.8.8.8\n")
-	base.Cmd("run", "--rm", "--dns-search", "test", testutil.CommonImage,
-		"cat", "/etc/resolv.conf").AssertOutContains("search test\n")
-	base.Cmd("run", "--rm", "--dns-search", "test", "--dns-search", "test1", testutil.CommonImage,
-		"cat", "/etc/resolv.conf").AssertOutContains("search test test1\n")
-	base.Cmd("run", "--rm", "--dns-opt", "no-tld-query", "--dns-option", "attempts:10", testutil.CommonImage,
-		"cat", "/etc/resolv.conf").AssertOutContains("options no-tld-query attempts:10\n")
-	cmd := base.Cmd("run", "--rm", "--dns", "8.8.8.8", "--dns-search", "test", "--dns-option", "attempts:10", testutil.CommonImage,
-		"cat", "/etc/resolv.conf")
-	cmd.AssertOutContains("nameserver 8.8.8.8\n")
-	cmd.AssertOutContains("search test\n")
-	cmd.AssertOutContains("options attempts:10\n")
+	testCase.SubTests = []*test.Case{
+		{
+			Description: "dns nameserver",
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				return helpers.Command("run", "--rm", "--dns", "8.8.8.8", testutil.CommonImage, "cat", "/etc/resolv.conf")
+			},
+			Expected: test.Expects(expect.ExitCodeSuccess, nil, expect.Contains("nameserver 8.8.8.8\n")),
+		},
+		{
+			Description: "dns search single",
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				return helpers.Command("run", "--rm", "--dns-search", "test", testutil.CommonImage, "cat", "/etc/resolv.conf")
+			},
+			Expected: test.Expects(expect.ExitCodeSuccess, nil, expect.Contains("search test\n")),
+		},
+		{
+			Description: "dns search multiple",
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				return helpers.Command("run", "--rm", "--dns-search", "test", "--dns-search", "test1", testutil.CommonImage, "cat", "/etc/resolv.conf")
+			},
+			Expected: test.Expects(expect.ExitCodeSuccess, nil, expect.Contains("search test test1\n")),
+		},
+		{
+			Description: "dns options",
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				return helpers.Command("run", "--rm", "--dns-opt", "no-tld-query", "--dns-option", "attempts:10", testutil.CommonImage, "cat", "/etc/resolv.conf")
+			},
+			Expected: test.Expects(expect.ExitCodeSuccess, nil, expect.Contains("options no-tld-query attempts:10\n")),
+		},
+		{
+			Description: "dns combined flags",
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				return helpers.Command("run", "--rm", "--dns", "8.8.8.8", "--dns-search", "test", "--dns-option", "attempts:10", testutil.CommonImage, "cat", "/etc/resolv.conf")
+			},
+			Expected: test.Expects(expect.ExitCodeSuccess, nil, expect.All(
+				expect.Contains("nameserver 8.8.8.8\n"),
+				expect.Contains("search test\n"),
+				expect.Contains("options attempts:10\n"),
+			)),
+		},
+	}
+
+	testCase.Run(t)
 }
 
 func TestRunNetworkHostHostname(t *testing.T) {
-	base := testutil.NewBase(t)
+	testCase := nerdtest.Setup()
 
-	hostname, err := os.Hostname()
-	assert.NilError(t, err)
-	hostname = hostname + "\n"
-	base.Cmd("run", "--rm", "--network", "host", testutil.CommonImage, "hostname").AssertOutExactly(hostname)
-	base.Cmd("run", "--rm", "--network", "host", testutil.CommonImage, "sh", "-euxc", "echo $HOSTNAME").AssertOutExactly(hostname)
-	base.Cmd("run", "--rm", "--network", "host", "--hostname", "override", testutil.CommonImage, "hostname").AssertOutExactly("override\n")
-	base.Cmd("run", "--rm", "--network", "host", "--hostname", "override", testutil.CommonImage, "sh", "-euxc", "echo $HOSTNAME").AssertOutExactly("override\n")
+	testCase.Setup = func(data test.Data, helpers test.Helpers) {
+		hostname, err := os.Hostname()
+		assert.NilError(helpers.T(), err)
+		data.Labels().Set("hostname", hostname)
+	}
+
+	testCase.SubTests = []*test.Case{
+		{
+			Description: "hostname command returns host hostname",
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				return helpers.Command("run", "--rm", "--network", "host", testutil.CommonImage, "hostname")
+			},
+			Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
+				return &test.Expected{
+					Output: expect.Equals(data.Labels().Get("hostname") + "\n"),
+				}
+			},
+		},
+		{
+			Description: "HOSTNAME env returns host hostname",
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				return helpers.Command("run", "--rm", "--network", "host", testutil.CommonImage, "sh", "-euxc", "echo $HOSTNAME")
+			},
+			Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
+				return &test.Expected{
+					Output: expect.Equals(data.Labels().Get("hostname") + "\n"),
+				}
+			},
+		},
+		{
+			Description: "hostname override with hostname command",
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				return helpers.Command("run", "--rm", "--network", "host", "--hostname", "override", testutil.CommonImage, "hostname")
+			},
+			Expected: test.Expects(expect.ExitCodeSuccess, nil, expect.Equals("override\n")),
+		},
+		{
+			Description: "hostname override with HOSTNAME env",
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				return helpers.Command("run", "--rm", "--network", "host", "--hostname", "override", testutil.CommonImage, "sh", "-euxc", "echo $HOSTNAME")
+			},
+			Expected: test.Expects(expect.ExitCodeSuccess, nil, expect.Equals("override\n")),
+		},
+	}
+
+	testCase.Run(t)
 }
 
 func TestRunNetworkHost2613(t *testing.T) {
-	base := testutil.NewBase(t)
+	nerdtest.Setup()
 
-	base.Cmd("run", "--rm", "--add-host", "foo:1.2.3.4", testutil.CommonImage, "getent", "hosts", "foo").AssertOutExactly("1.2.3.4           foo  foo\n")
+	testCase := &test.Case{
+		Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+			return helpers.Command("run", "--rm", "--add-host", "foo:1.2.3.4", testutil.CommonImage, "getent", "hosts", "foo")
+		},
+		Expected: test.Expects(expect.ExitCodeSuccess, nil, expect.Equals("1.2.3.4           foo  foo\n")),
+	}
+
+	testCase.Run(t)
 }
 
 func TestSharedNetworkSetup(t *testing.T) {
@@ -518,158 +596,100 @@ func TestSharedNetworkSetup(t *testing.T) {
 	testCase := &test.Case{
 		Require: require.Not(require.Windows),
 		Setup: func(data test.Data, helpers test.Helpers) {
-			data.Labels().Set("containerName1", data.Identifier("-container1"))
-			containerName1 := data.Labels().Get("containerName1")
-			helpers.Ensure("run", "-d", "--name", containerName1,
-				testutil.NginxAlpineImage)
+			data.Labels().Set("container1", data.Identifier("container1"))
+			helpers.Ensure("run", "-d", "--name", data.Identifier("container1"),
+				testutil.CommonImage, "sleep", "inf")
+			nerdtest.EnsureContainerStarted(helpers, data.Identifier("container1"))
 		},
 		Cleanup: func(data test.Data, helpers test.Helpers) {
-			helpers.Anyhow("rm", "-f", data.Identifier("-container1"))
+			helpers.Anyhow("rm", "-f", data.Identifier("container1"))
 		},
 		SubTests: []*test.Case{
 			{
 				Description: "Test network is shared",
 				NoParallel:  true, // The validation involves starting of the main container: container1
 				Cleanup: func(data test.Data, helpers test.Helpers) {
-					helpers.Anyhow("rm", "-f", data.Identifier())
+					helpers.Anyhow("rm", "-f", data.Identifier("container2"))
 				},
-				Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
-					containerName2 := data.Identifier()
-					cmd := helpers.Command()
-					cmd.WithArgs("run", "-d", "--name", containerName2,
-						"--network=container:"+data.Labels().Get("containerName1"),
-						testutil.NginxAlpineImage)
-					return cmd
+				Setup: func(data test.Data, helpers test.Helpers) {
+					helpers.Ensure("run", "-d", "--name", data.Identifier("container2"), "--network=container:"+data.Labels().Get("container1"), testutil.NginxAlpineImage)
+					data.Labels().Set("container2", data.Identifier("container2"))
+					nerdtest.EnsureContainerStarted(helpers, data.Identifier("container2"))
 				},
-				Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
-					return &test.Expected{
-						Output: func(stdout string, info string, t *testing.T) {
-							containerName2 := data.Identifier()
-							assert.Assert(t, strings.Contains(helpers.Capture("exec", containerName2, "wget", "-qO-", "http://127.0.0.1:80"), testutil.NginxAlpineIndexHTMLSnippet), info)
-							helpers.Ensure("restart", data.Labels().Get("containerName1"))
-							helpers.Ensure("stop", "--time=1", containerName2)
-							helpers.Ensure("start", containerName2)
-							assert.Assert(t, strings.Contains(helpers.Capture("exec", containerName2, "wget", "-qO-", "http://127.0.0.1:80"), testutil.NginxAlpineIndexHTMLSnippet), info)
+				SubTests: []*test.Case{
+					{
+						NoParallel:  true,
+						Description: "Test network is shared",
+						Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+							return helpers.Command("exec", data.Labels().Get("container2"), "wget", "-qO-", "http://127.0.0.1:80")
 						},
-					}
+						Expected: test.Expects(0, nil, expect.Contains(testutil.NginxAlpineIndexHTMLSnippet)),
+					},
+					{
+						NoParallel:  true,
+						Description: "Test network is shared after restart",
+						Setup: func(data test.Data, helpers test.Helpers) {
+							helpers.Ensure("restart", data.Labels().Get("container1"))
+							helpers.Ensure("stop", "--time=1", data.Labels().Get("container2"))
+							helpers.Ensure("start", data.Labels().Get("container2"))
+							nerdtest.EnsureContainerStarted(helpers, data.Labels().Get("container2"))
+						},
+						Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+							return helpers.Command("exec", data.Labels().Get("container2"), "wget", "-qO-", "http://127.0.0.1:80")
+
+						},
+						Expected: test.Expects(0, nil, expect.Contains(testutil.NginxAlpineIndexHTMLSnippet)),
+					},
 				},
 			},
 			{
 				Description: "Test uts is supported in shared network",
-				Cleanup: func(data test.Data, helpers test.Helpers) {
-					helpers.Anyhow("rm", "-f", data.Identifier())
-				},
 				Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
-					containerName2 := data.Identifier()
-					cmd := helpers.Command()
-					cmd.WithArgs("run", "-d", "--name", containerName2, "--uts", "host",
-						"--network=container:"+data.Labels().Get("containerName1"),
-						testutil.AlpineImage)
-					return cmd
+					return helpers.Command("run", "--rm", "--uts", "host",
+						"--network=container:"+data.Labels().Get("container1"),
+						testutil.CommonImage)
 				},
-				Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
-					return &test.Expected{
-						ExitCode: 0,
-					}
-				},
+				Expected: test.Expects(0, nil, nil),
 			},
 			{
 				Description: "Test dns is not supported",
-				Cleanup: func(data test.Data, helpers test.Helpers) {
-					helpers.Anyhow("rm", "-f", data.Identifier())
-				},
 				Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
-					containerName2 := data.Identifier()
-					cmd := helpers.Command()
-					cmd.WithArgs("run", "-d", "--name", containerName2, "--dns", "0.1.2.3",
-						"--network=container:"+data.Labels().Get("containerName1"),
-						testutil.AlpineImage)
-					return cmd
+					return helpers.Command("run", "--rm", "--dns", "0.1.2.3",
+						"--network=container:"+data.Labels().Get("container1"),
+						testutil.CommonImage)
 				},
-				Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
-					if nerdtest.IsDocker() {
-						return &test.Expected{
-							ExitCode: 125,
-						}
-
-					}
-					return &test.Expected{
-						ExitCode: 1,
-					}
-				},
+				// 1 for nerdctl, 125 for docker
+				Expected: test.Expects(expect.ExitCodeGenericFail, nil, nil),
 			},
 			{
 				Description: "Test dns options is not  supported",
-				Cleanup: func(data test.Data, helpers test.Helpers) {
-					helpers.Anyhow("rm", "-f", data.Identifier())
-				},
 				Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
-					containerName2 := data.Identifier()
-					cmd := helpers.Command()
-					cmd.WithArgs("run", "--name", containerName2, "--dns-option", "attempts:5",
-						"--network=container:"+data.Labels().Get("containerName1"),
-						testutil.AlpineImage, "cat", "/etc/resolv.conf")
-					return cmd
+					return helpers.Command("run", "--rm", "--dns-option", "attempts:5",
+						"--network=container:"+data.Labels().Get("container1"),
+						testutil.CommonImage, "cat", "/etc/resolv.conf")
 				},
-				Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
-					// The Option doesnt throw an error but is never inserted to the resolv.conf
-					return &test.Expected{
-						ExitCode: 0,
-						Output: func(stdout string, info string, t *testing.T) {
-							assert.Assert(t, !strings.Contains(stdout, "attempts:5"), info)
-						},
-					}
-				},
+				// The Option doesn't throw an error but is never inserted to the resolv.conf
+				Expected: test.Expects(0, nil, expect.DoesNotContain("attempts:5")),
 			},
 			{
 				Description: "Test publish is not supported",
-				Cleanup: func(data test.Data, helpers test.Helpers) {
-					helpers.Anyhow("rm", "-f", data.Identifier())
-				},
 				Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
-					containerName2 := data.Identifier()
-					cmd := helpers.Command()
-					cmd.WithArgs("run", "-d", "--name", containerName2, "--publish", "80:8080",
-						"--network=container:"+data.Labels().Get("containerName1"),
+					return helpers.Command("run", "--rm", "--publish", "80:8080",
+						"--network=container:"+data.Labels().Get("container1"),
 						testutil.AlpineImage)
-					return cmd
 				},
-				Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
-					if nerdtest.IsDocker() {
-						return &test.Expected{
-							ExitCode: 125,
-						}
-
-					}
-					return &test.Expected{
-						ExitCode: 1,
-					}
-				},
+				// 1 for nerdctl, 125 for docker
+				Expected: test.Expects(expect.ExitCodeGenericFail, nil, nil),
 			},
 			{
 				Description: "Test hostname is not supported",
-				Cleanup: func(data test.Data, helpers test.Helpers) {
-					helpers.Anyhow("rm", "-f", data.Identifier())
-				},
 				Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
-					containerName2 := data.Identifier()
-					cmd := helpers.Command()
-					cmd.WithArgs("run", "-d", "--name", containerName2, "--hostname", "test",
-						"--network=container:"+data.Labels().Get("containerName1"),
+					return helpers.Command("run", "--rm", "--hostname", "test",
+						"--network=container:"+data.Labels().Get("container1"),
 						testutil.AlpineImage)
-					return cmd
 				},
-				Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
-					if nerdtest.IsDocker() {
-						return &test.Expected{
-							ExitCode: 125,
-						}
-
-					}
-					return &test.Expected{
-						ExitCode: 1,
-					}
-				},
+				// 1 for nerdctl, 125 for docker
+				Expected: test.Expects(expect.ExitCodeGenericFail, nil, nil),
 			},
 		},
 	}
@@ -682,15 +702,15 @@ func TestSharedNetworkWithNone(t *testing.T) {
 		Require: require.Not(require.Windows),
 		Setup: func(data test.Data, helpers test.Helpers) {
 			helpers.Ensure("run", "-d", "--name", data.Identifier("container1"), "--network", "none",
-				testutil.NginxAlpineImage)
+				testutil.CommonImage, "sleep", "inf")
+			nerdtest.EnsureContainerStarted(helpers, data.Identifier("container1"))
 		},
 		Cleanup: func(data test.Data, helpers test.Helpers) {
 			helpers.Anyhow("rm", "-f", data.Identifier("container1"))
-			helpers.Anyhow("rm", "-f", data.Identifier("container2"))
 		},
 		Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
-			return helpers.Command("run", "-d", "--name", data.Identifier("container2"),
-				"--network=container:"+data.Identifier("container1"), testutil.NginxAlpineImage)
+			return helpers.Command("run", "--rm",
+				"--network=container:"+data.Identifier("container1"), testutil.CommonImage)
 		},
 		Expected: test.Expects(expect.ExitCodeSuccess, nil, nil),
 	}
@@ -698,229 +718,342 @@ func TestSharedNetworkWithNone(t *testing.T) {
 }
 
 func TestRunContainerInExistingNetNS(t *testing.T) {
-	if rootlessutil.IsRootless() {
-		t.Skip("Can't create new netns in rootless mode")
+	testCase := nerdtest.Setup()
+
+	testCase.Require = require.All(
+		nerdtest.Rootful,
+		require.Not(nerdtest.Docker),
+	)
+
+	testCase.Setup = func(data test.Data, helpers test.Helpers) {
+		netNS, err := netns.NewNetNS(data.Temp().Dir("netns-dir") + "/netns")
+		assert.NilError(helpers.T(), err)
+		err = netNS.Do(func(netns ns.NetNS) error {
+			loopback, err := netlink.LinkByName("lo")
+			assert.NilError(helpers.T(), err)
+			err = netlink.LinkSetUp(loopback)
+			assert.NilError(helpers.T(), err)
+			return nil
+		})
+		assert.NilError(helpers.T(), err)
+		data.Labels().Set("netNSPath", netNS.GetPath())
+
+		helpers.Ensure("run", "-d", "--name", data.Identifier(),
+			"--network=ns:"+netNS.GetPath(), testutil.NginxAlpineImage)
+		nerdtest.EnsureContainerStarted(helpers, data.Identifier())
+		time.Sleep(3 * time.Second)
 	}
-	testutil.DockerIncompatible(t)
-	base := testutil.NewBase(t)
 
-	netNS, err := netns.NewNetNS(t.TempDir() + "/netns")
-	assert.NilError(t, err)
-	err = netNS.Do(func(netns ns.NetNS) error {
-		loopback, err := netlink.LinkByName("lo")
-		assert.NilError(t, err)
-		err = netlink.LinkSetUp(loopback)
-		assert.NilError(t, err)
-		return nil
-	})
-	assert.NilError(t, err)
-	defer netNS.Remove()
+	testCase.Cleanup = func(data test.Data, helpers test.Helpers) {
+		helpers.Anyhow("rm", "-f", data.Identifier())
+		if netNSPath := data.Labels().Get("netNSPath"); netNSPath != "" {
+			loadedNS := netns.LoadNetNS(netNSPath)
+			_ = loadedNS.Remove()
+		}
+	}
 
-	containerName := testutil.Identifier(t)
-	defer base.Cmd("rm", "-f", containerName).AssertOK()
-	base.Cmd("run", "-d", "--name", containerName,
-		"--network=ns:"+netNS.GetPath(), testutil.NginxAlpineImage).AssertOK()
-	base.EnsureContainerStarted(containerName)
-	time.Sleep(3 * time.Second)
+	testCase.Command = func(data test.Data, helpers test.Helpers) test.TestableCommand {
+		return helpers.Command("inspect", "--format", "{{.State.Running}}", data.Identifier())
+	}
 
-	err = netNS.Do(func(netns ns.NetNS) error {
-		stdout, err := exec.Command("curl", "-s", "http://127.0.0.1:80").Output()
-		assert.NilError(t, err)
-		assert.Assert(t, strings.Contains(string(stdout), testutil.NginxAlpineIndexHTMLSnippet))
-		return nil
-	})
-	assert.NilError(t, err)
+	testCase.Expected = func(data test.Data, helpers test.Helpers) *test.Expected {
+		return &test.Expected{
+			Output: func(stdout string, t tig.T) {
+				assert.Assert(t, strings.Contains(stdout, "true"), "container should be running")
+
+				netNSPath := data.Labels().Get("netNSPath")
+				testNetNS, err := ns.GetNS(netNSPath)
+				assert.NilError(t, err)
+				err = testNetNS.Do(func(ns.NetNS) error {
+					curlOut, err := exec.Command("curl", "-s", "http://127.0.0.1:80").Output()
+					assert.NilError(t, err)
+					assert.Assert(t, strings.Contains(string(curlOut), testutil.NginxAlpineIndexHTMLSnippet))
+					return nil
+				})
+				assert.NilError(t, err)
+			},
+		}
+	}
+
+	testCase.Run(t)
 }
 
 func TestRunContainerWithMACAddress(t *testing.T) {
-	base := testutil.NewBase(t)
-	tID := testutil.Identifier(t)
-	networkBridge := "testNetworkBridge" + tID
-	networkMACvlan := "testNetworkMACvlan" + tID
-	networkIPvlan := "testNetworkIPvlan" + tID
-	tearDown := func() {
-		base.Cmd("network", "rm", networkBridge).Run()
-		base.Cmd("network", "rm", networkMACvlan).Run()
-		base.Cmd("network", "rm", networkIPvlan).Run()
-	}
+	testCase := nerdtest.Setup()
 
-	tearDown()
-	t.Cleanup(tearDown)
+	testCase.Setup = func(data test.Data, helpers test.Helpers) {
+		helpers.Ensure("network", "create", data.Identifier("bridge"), "--driver", "bridge")
+		helpers.Ensure("network", "create", data.Identifier("macvlan"), "--driver", "macvlan")
+		helpers.Ensure("network", "create", data.Identifier("ipvlan"), "--driver", "ipvlan")
 
-	base.Cmd("network", "create", networkBridge, "--driver", "bridge").AssertOK()
-	base.Cmd("network", "create", networkMACvlan, "--driver", "macvlan").AssertOK()
-	base.Cmd("network", "create", networkIPvlan, "--driver", "ipvlan").AssertOK()
+		data.Labels().Set("networkBridge", data.Identifier("bridge"))
+		data.Labels().Set("networkMACvlan", data.Identifier("macvlan"))
+		data.Labels().Set("networkIPvlan", data.Identifier("ipvlan"))
 
-	defaultMac := base.Cmd("run", "--rm", "-i", "--network", "host", testutil.CommonImage).
-		CmdOption(testutil.WithStdin(strings.NewReader("ip addr show eth0 | grep ether | awk '{printf $2}'"))).
-		Run().Stdout()
-
-	passedMac := "we expect the generated mac on the output"
-
-	tests := []struct {
-		Network string
-		WantErr bool
-		Expect  string
-	}{
-		{"host", false, defaultMac},                     // anything but the actual address being passed
-		{"none", false, ""},                             // nothing
-		{"container:whatever" + tID, true, "container"}, // "No such container" vs. "could not find container"
-		{"bridge", false, passedMac},
-		{networkBridge, false, passedMac},
-		{networkMACvlan, false, passedMac},
-		{networkIPvlan, true, "not support"},
-	}
-
-	for i, test := range tests {
-		containerName := fmt.Sprintf("%s_%d", tID, i)
-		testName := fmt.Sprintf("%s_container:%s_network:%s_expect:%s", tID, containerName, test.Network, test.Expect)
-		expect := test.Expect
-		network := test.Network
-		wantErr := test.WantErr
-		t.Run(testName, func(tt *testing.T) {
-			tt.Parallel()
-
-			macAddress, err := nettestutil.GenerateMACAddress()
-			if err != nil {
-				t.Errorf("failed to generate MAC address: %s", err)
-			}
-			if expect == passedMac {
-				expect = macAddress
-			}
-
-			res := base.Cmd("run", "--rm", "-i", "--network", network, "--mac-address", macAddress, testutil.CommonImage).
-				CmdOption(testutil.WithStdin(strings.NewReader("ip addr show eth0 | grep ether | awk '{printf $2}'"))).Run()
-
-			if wantErr {
-				assert.Assert(t, res.ExitCode != 0, "Command should have failed", res)
-				assert.Assert(t, strings.Contains(res.Combined(), expect), fmt.Sprintf("expected output to contain %q: %q", expect, res.Combined()))
-			} else {
-				assert.Assert(t, res.ExitCode == 0, "Command should have succeeded", res)
-				assert.Assert(t, strings.Contains(res.Stdout(), expect), fmt.Sprintf("expected output to contain %q: %q", expect, res.Stdout()))
-			}
+		// Get the default MAC address of eth0 on the host network
+		cmd := helpers.Command("run", "--rm", "-i", "--network", "host", testutil.CommonImage)
+		cmd.Feed(strings.NewReader("ip addr show eth0 | grep ether | awk '{printf $2}'"))
+		cmd.Run(&test.Expected{
+			Output: func(stdout string, t tig.T) {
+				data.Labels().Set("defaultMac", stdout)
+			},
 		})
-
 	}
+
+	testCase.Cleanup = func(data test.Data, helpers test.Helpers) {
+		helpers.Anyhow("network", "rm", data.Identifier("bridge"))
+		helpers.Anyhow("network", "rm", data.Identifier("macvlan"))
+		helpers.Anyhow("network", "rm", data.Identifier("ipvlan"))
+	}
+
+	type macTestCase struct {
+		networkKey string // label key or literal network name
+		isLiteral  bool   // if true, use networkKey as-is; otherwise look up from labels
+		wantErr    bool
+		expectKey  string // "defaultMac", "passedMac", "", or a literal substring
+	}
+
+	macTestCases := []macTestCase{
+		{networkKey: "host", isLiteral: true, wantErr: false, expectKey: "defaultMac"},
+		{networkKey: "none", isLiteral: true, wantErr: false, expectKey: ""},
+		{networkKey: "container:whatever", isLiteral: true, wantErr: true, expectKey: "container"},
+		{networkKey: "bridge", isLiteral: true, wantErr: false, expectKey: "passedMac"},
+		{networkKey: "networkBridge", isLiteral: false, wantErr: false, expectKey: "passedMac"},
+		{networkKey: "networkMACvlan", isLiteral: false, wantErr: false, expectKey: "passedMac"},
+		{networkKey: "networkIPvlan", isLiteral: false, wantErr: true, expectKey: "not support"},
+	}
+
+	for i, mc := range macTestCases {
+		mc := mc
+		i := i
+		desc := mc.networkKey
+		if !mc.isLiteral {
+			desc = mc.networkKey + " (custom)"
+		}
+		testCase.SubTests = append(testCase.SubTests, &test.Case{
+			Description: fmt.Sprintf("network %s", desc),
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				macAddress, err := nettestutil.GenerateMACAddress()
+				assert.NilError(helpers.T(), err)
+				data.Labels().Set(fmt.Sprintf("mac-%d", i), macAddress)
+
+				network := mc.networkKey
+				if !mc.isLiteral {
+					network = data.Labels().Get(mc.networkKey)
+				}
+
+				cmd := helpers.Command("run", "--rm", "-i", "--network", network, "--mac-address", macAddress, testutil.CommonImage)
+				cmd.Feed(strings.NewReader("ip addr show eth0 | grep ether | awk '{printf $2}'"))
+				return cmd
+			},
+			Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
+				if mc.wantErr {
+					return &test.Expected{
+						ExitCode: expect.ExitCodeGenericFail,
+						Output: func(stdout string, t tig.T) {
+							// For error cases, check combined stderr
+						},
+					}
+				}
+
+				expectedStr := ""
+				switch mc.expectKey {
+				case "defaultMac":
+					expectedStr = data.Labels().Get("defaultMac")
+				case "passedMac":
+					expectedStr = data.Labels().Get(fmt.Sprintf("mac-%d", i))
+				case "":
+					// no output expected (none network)
+				}
+
+				if expectedStr == "" {
+					return &test.Expected{
+						ExitCode: expect.ExitCodeSuccess,
+					}
+				}
+				return &test.Expected{
+					Output: expect.Contains(expectedStr),
+				}
+			},
+		})
+	}
+
+	testCase.Run(t)
 }
 
 func TestHostsFileMounts(t *testing.T) {
-	if rootlessutil.IsRootless() {
-		if detachedNetNS, _ := rootlessutil.DetachedNetNS(); detachedNetNS != "" {
-			t.Skip("/etc/hosts is not writable")
-		}
+	testCase := nerdtest.Setup()
+
+	testCase.Require = require.Not(nerdtest.RootlessWithDetachNetNS) // etc/hosts is not writable
+	testCase.NoParallel = true
+
+	type hostsTestCase struct {
+		desc     string
+		args     []string
+		wantFail bool
 	}
-	base := testutil.NewBase(t)
 
-	base.Cmd("run", "--rm", testutil.CommonImage,
-		"sh", "-euxc", "echo >> /etc/hosts").AssertOK()
-	base.Cmd("run", "--rm", "--network", "host", testutil.CommonImage,
-		"sh", "-euxc", "echo >> /etc/hosts").AssertOK()
-	base.Cmd("run", "--rm", "-v", "/etc/hosts:/etc/hosts:ro", "--network", "host", testutil.CommonImage,
-		"sh", "-euxc", "echo >> /etc/hosts").AssertFail()
-	// add a line into /etc/hosts and remove it.
-	base.Cmd("run", "--rm", "-v", "/etc/hosts:/etc/hosts", "--network", "host", testutil.CommonImage,
-		"sh", "-euxc", "echo >> /etc/hosts").AssertOK()
-	base.Cmd("run", "--rm", "-v", "/etc/hosts:/etc/hosts", "--network", "host", testutil.CommonImage,
-		"sh", "-euxc", "head -n -1 /etc/hosts > temp && cat temp > /etc/hosts").AssertOK()
-	base.Cmd("run", "--rm", "--network", "none", testutil.CommonImage,
-		"sh", "-euxc", "echo >> /etc/hosts").AssertOK()
+	hostsTestCases := []hostsTestCase{
+		// /etc/hosts tests
+		{
+			desc: "write /etc/hosts default network",
+			args: []string{"run", "--rm", testutil.CommonImage, "sh", "-euxc", "echo >> /etc/hosts"},
+		},
+		{
+			desc: "write /etc/hosts host network",
+			args: []string{"run", "--rm", "--network", "host", testutil.CommonImage, "sh", "-euxc", "echo >> /etc/hosts"},
+		},
+		{
+			desc:     "write /etc/hosts host network ro mount fails",
+			args:     []string{"run", "--rm", "-v", "/etc/hosts:/etc/hosts:ro", "--network", "host", testutil.CommonImage, "sh", "-euxc", "echo >> /etc/hosts"},
+			wantFail: true,
+		},
+		{
+			desc: "write /etc/hosts host network rw mount",
+			args: []string{"run", "--rm", "-v", "/etc/hosts:/etc/hosts", "--network", "host", testutil.CommonImage, "sh", "-euxc", "echo >> /etc/hosts"},
+		},
+		{
+			desc: "restore /etc/hosts host network rw mount",
+			args: []string{"run", "--rm", "-v", "/etc/hosts:/etc/hosts", "--network", "host", testutil.CommonImage, "sh", "-euxc", "head -n -1 /etc/hosts > temp && cat temp > /etc/hosts"},
+		},
+		{
+			desc: "write /etc/hosts none network",
+			args: []string{"run", "--rm", "--network", "none", testutil.CommonImage, "sh", "-euxc", "echo >> /etc/hosts"},
+		},
+		// /etc/resolv.conf tests
+		{
+			desc: "write /etc/resolv.conf default network",
+			args: []string{"run", "--rm", testutil.CommonImage, "sh", "-euxc", "echo >> /etc/resolv.conf"},
+		},
+		{
+			desc: "write /etc/resolv.conf host network",
+			args: []string{"run", "--rm", "--network", "host", testutil.CommonImage, "sh", "-euxc", "echo >> /etc/resolv.conf"},
+		},
+		{
+			desc:     "write /etc/resolv.conf host network ro mount fails",
+			args:     []string{"run", "--rm", "-v", "/etc/resolv.conf:/etc/resolv.conf:ro", "--network", "host", testutil.CommonImage, "sh", "-euxc", "echo >> /etc/resolv.conf"},
+			wantFail: true,
+		},
+		{
+			desc: "write /etc/resolv.conf host network rw mount",
+			args: []string{"run", "--rm", "-v", "/etc/resolv.conf:/etc/resolv.conf", "--network", "host", testutil.CommonImage, "sh", "-euxc", "echo >> /etc/resolv.conf"},
+		},
+		{
+			desc: "restore /etc/resolv.conf host network rw mount",
+			args: []string{"run", "--rm", "-v", "/etc/resolv.conf:/etc/resolv.conf", "--network", "host", testutil.CommonImage, "sh", "-euxc", "head -n -1 /etc/resolv.conf > temp && cat temp > /etc/resolv.conf"},
+		},
+		{
+			desc: "write /etc/resolv.conf host network after restore",
+			args: []string{"run", "--rm", "--network", "host", testutil.CommonImage, "sh", "-euxc", "echo >> /etc/resolv.conf"},
+		},
+	}
 
-	base.Cmd("run", "--rm", testutil.CommonImage,
-		"sh", "-euxc", "echo >> /etc/resolv.conf").AssertOK()
-	base.Cmd("run", "--rm", "--network", "host", testutil.CommonImage,
-		"sh", "-euxc", "echo >> /etc/resolv.conf").AssertOK()
-	base.Cmd("run", "--rm", "-v", "/etc/resolv.conf:/etc/resolv.conf:ro", "--network", "host", testutil.CommonImage,
-		"sh", "-euxc", "echo >> /etc/resolv.conf").AssertFail()
-	// add a line into /etc/resolv.conf and remove it.
-	base.Cmd("run", "--rm", "-v", "/etc/resolv.conf:/etc/resolv.conf", "--network", "host", testutil.CommonImage,
-		"sh", "-euxc", "echo >> /etc/resolv.conf").AssertOK()
-	base.Cmd("run", "--rm", "-v", "/etc/resolv.conf:/etc/resolv.conf", "--network", "host", testutil.CommonImage,
-		"sh", "-euxc", "head -n -1 /etc/resolv.conf > temp && cat temp > /etc/resolv.conf").AssertOK()
-	base.Cmd("run", "--rm", "--network", "host", testutil.CommonImage,
-		"sh", "-euxc", "echo >> /etc/resolv.conf").AssertOK()
+	for _, hc := range hostsTestCases {
+		hc := hc
+		var expected test.Manager
+		if hc.wantFail {
+			expected = test.Expects(expect.ExitCodeGenericFail, nil, nil)
+		} else {
+			expected = test.Expects(expect.ExitCodeSuccess, nil, nil)
+		}
+		testCase.SubTests = append(testCase.SubTests, &test.Case{
+			Description: hc.desc,
+			NoParallel:  true,
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				return helpers.Command(hc.args...)
+			},
+			Expected: expected,
+		})
+	}
+
+	testCase.Run(t)
 }
 
 func TestRunContainerWithStaticIP6(t *testing.T) {
-	if rootlessutil.IsRootless() {
-		t.Skip("Static IP6 assignment is not supported rootless mode yet.")
+	testCase := nerdtest.Setup()
+
+	if rootlessutil.IsRootless() && !testutil.RootlessKitIPv6Enabled(t.Context()) {
+		t.Skip("Rootless IPv6 requires CONTAINERD_ROOTLESS_ROOTLESSKIT_IPV6=true; see docs/rootless.md")
 	}
-	networkName := "test-network"
+
 	networkSubnet := "2001:db8:5::/64"
-	_, subnet, err := net.ParseCIDR(networkSubnet)
-	assert.Assert(t, err == nil)
-	base := testutil.NewBaseWithIPv6Compatible(t)
-	base.Cmd("network", "create", networkName, "--subnet", networkSubnet, "--ipv6").AssertOK()
-	t.Cleanup(func() {
-		base.Cmd("network", "rm", networkName).Run()
-	})
-	testCases := []struct {
-		ip                string
-		shouldSuccess     bool
-		checkTheIPAddress bool
-	}{
+
+	testCase.Setup = func(data test.Data, helpers test.Helpers) {
+		data.Labels().Set("networkName", data.Identifier("ipv6net"))
+		data.Labels().Set("networkSubnet", networkSubnet)
+		helpers.Ensure("network", "create", data.Identifier("ipv6net"), "--subnet", networkSubnet, "--ipv6")
+	}
+
+	testCase.Cleanup = func(data test.Data, helpers test.Helpers) {
+		helpers.Anyhow("network", "rm", data.Identifier("ipv6net"))
+	}
+
+	testCase.SubTests = []*test.Case{
 		{
-			ip:                "",
-			shouldSuccess:     true,
-			checkTheIPAddress: false,
+			Description: "auto-assigned IPv6 within subnet",
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				return helpers.Command("run", "--rm", "--name", data.Identifier("auto"),
+					"--network", data.Labels().Get("networkName"),
+					testutil.NginxAlpineImage, "ip", "addr", "show", "dev", "eth0")
+			},
+			Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
+				return &test.Expected{
+					Output: func(stdout string, t tig.T) {
+						_, subnet, err := net.ParseCIDR(data.Labels().Get("networkSubnet"))
+						assert.NilError(t, err)
+						ip := nerdtest.FindIPv6(stdout)
+						assert.Assert(t, subnet.Contains(ip), "expected subnet %s to include ip %s", subnet, ip)
+					},
+				}
+			},
 		},
 		{
-			ip:                "2001:db8:5::6",
-			shouldSuccess:     true,
-			checkTheIPAddress: true,
+			Description: "static IPv6 exact match",
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				return helpers.Command("run", "--rm", "--name", data.Identifier("static"),
+					"--network", data.Labels().Get("networkName"),
+					"--ip6", "2001:db8:5::6",
+					testutil.NginxAlpineImage, "ip", "addr", "show", "dev", "eth0")
+			},
+			Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
+				return &test.Expected{
+					Output: func(stdout string, t tig.T) {
+						_, subnet, err := net.ParseCIDR(data.Labels().Get("networkSubnet"))
+						assert.NilError(t, err)
+						ip := nerdtest.FindIPv6(stdout)
+						assert.Assert(t, subnet.Contains(ip), "expected subnet %s to include ip %s", subnet, ip)
+						assert.Equal(t, "2001:db8:5::6", ip.String())
+					},
+				}
+			},
 		},
 		{
-			ip:                "2001:db8:4::6",
-			shouldSuccess:     false,
-			checkTheIPAddress: false,
+			Description: "static IPv6 outside subnet fails",
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				return helpers.Command("run", "--rm", "--name", data.Identifier("badip6"),
+					"--network", data.Labels().Get("networkName"),
+					"--ip6", "2001:db8:4::6",
+					testutil.NginxAlpineImage, "ip", "addr", "show", "dev", "eth0")
+			},
+			Expected: test.Expects(expect.ExitCodeGenericFail, nil, nil),
 		},
 	}
-	tID := testutil.Identifier(t)
-	for i, tc := range testCases {
-		i := i
-		tc := tc
-		tcName := fmt.Sprintf("%+v", tc)
-		t.Run(tcName, func(t *testing.T) {
-			testContainerName := fmt.Sprintf("%s-%d", tID, i)
-			base := testutil.NewBaseWithIPv6Compatible(t)
-			args := []string{
-				"run", "--rm", "--name", testContainerName, "--network", networkName,
-			}
-			if tc.ip != "" {
-				args = append(args, "--ip6", tc.ip)
-			}
-			args = append(args, []string{testutil.NginxAlpineImage, "ip", "addr", "show", "dev", "eth0"}...)
-			cmd := base.Cmd(args...)
-			if !tc.shouldSuccess {
-				cmd.AssertFail()
-				return
-			}
-			cmd.AssertOutWithFunc(func(stdout string) error {
-				ip := nerdtest.FindIPv6(stdout)
-				if !subnet.Contains(ip) {
-					return fmt.Errorf("expected subnet %s include ip %s", subnet, ip)
-				}
-				if tc.checkTheIPAddress {
-					if ip.String() != tc.ip {
-						return fmt.Errorf("expected ip %s, got %s", tc.ip, ip)
-					}
-				}
-				return nil
-			})
-		})
-	}
+
+	testCase.Run(t)
 }
 
 func TestNoneNetworkHostName(t *testing.T) {
 	nerdtest.Setup()
 	testCase := &test.Case{
 		Require: require.Not(require.Windows),
-		Setup: func(data test.Data, helpers test.Helpers) {
-			output := helpers.Capture("run", "-d", "--name", data.Identifier(), "--network", "none", testutil.NginxAlpineImage)
-			assert.Assert(helpers.T(), len(output) > 12, output)
-			data.Labels().Set("hostname", output[:12])
-		},
 		Cleanup: func(data test.Data, helpers test.Helpers) {
 			helpers.Anyhow("rm", "-f", data.Identifier())
+		},
+		Setup: func(data test.Data, helpers test.Helpers) {
+			output := helpers.Capture("run", "-d", "--name", data.Identifier(), "--network", "none", testutil.CommonImage, "sleep", "inf")
+			assert.Assert(helpers.T(), len(output) > 12, output)
+			data.Labels().Set("hostname", output[:12])
+			nerdtest.EnsureContainerStarted(helpers, data.Identifier())
 		},
 		Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
 			return helpers.Command("exec", data.Identifier(), "cat", "/etc/hostname")
@@ -939,20 +1072,83 @@ func TestHostNetworkHostName(t *testing.T) {
 	testCase := &test.Case{
 		Require: require.Not(require.Windows),
 		Setup: func(data test.Data, helpers test.Helpers) {
-			data.Labels().Set("containerName1", data.Identifier())
-		},
-		Cleanup: func(data test.Data, helpers test.Helpers) {
-			helpers.Anyhow("rm", "-f", data.Identifier())
+			helpers.Custom("cat", "/etc/hostname").Run(&test.Expected{
+				Output: func(stdout string, t tig.T) {
+					data.Labels().Set("hostHostname", stdout)
+				},
+			})
 		},
 		Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
-			return helpers.Custom("cat", "/etc/hostname")
+			return helpers.Command("run", "--rm",
+				"--network", "host",
+				testutil.AlpineImage, "cat", "/etc/hostname")
 		},
 		Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
 			return &test.Expected{
-				Output: func(stdout string, info string, t *testing.T) {
-					hostname := stdout
-					assert.Assert(t, strings.Compare(strings.TrimSpace(helpers.Capture("run", "--name", data.Identifier(), "--network", "host", testutil.AlpineImage, "cat", "/etc/hostname")), strings.TrimSpace(hostname)) == 0, info)
-				},
+				Output: expect.Equals(data.Labels().Get("hostHostname")),
+			}
+		},
+	}
+	testCase.Run(t)
+}
+
+func TestHostNetworkDnsPreserved(t *testing.T) {
+	nerdtest.Setup()
+	testCase := &test.Case{
+		Require: require.Not(require.Windows),
+		Setup: func(data test.Data, helpers test.Helpers) {
+			// In some rootless CI job, slirp provides 10.0.2.3 as DNS server.
+			// We cannot simply parse host /etc/resolv.conf here.
+			captureNameservers := func(resolvConfPath string) string {
+				var nameservers string
+				helpers.Command("run", "--rm",
+					"-v", resolvConfPath+":/mnt/resolv.conf:ro",
+					testutil.AlpineImage,
+					"grep", "-E", "^nameserver\\s+", "/mnt/resolv.conf").Run(&test.Expected{
+					Output: func(stdout string, t tig.T) {
+						nameservers = stdout
+					},
+				})
+				return nameservers
+			}
+			nameservers := captureNameservers("/etc/resolv.conf")
+			// Mirror pkg/resolvconf.Path(): when 127.0.0.53 is the only nameserver, the host
+			// runs systemd-resolved, and nerdctl uses the resolv.conf that systemd-resolved
+			// generates with the actual upstream nameservers.
+			// Docker, on the other hand, keeps the stub for host-network containers.
+			if !nerdtest.IsDocker() && strings.TrimSpace(nameservers) == "nameserver 127.0.0.53" {
+				nameservers = captureNameservers("/run/systemd/resolve/resolv.conf")
+			}
+			data.Labels().Set("nameservers", nameservers)
+		},
+		Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+			return helpers.Command("run", "--rm",
+				"--network", "host",
+				testutil.AlpineImage,
+				"grep", "-E", "^nameserver\\s+", "/etc/resolv.conf")
+		},
+		Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
+			// container with --network=host should have same nameserver as host
+			nameservers := data.Labels().Get("nameservers")
+			return &test.Expected{
+				Output: expect.Equals(nameservers),
+			}
+		},
+	}
+	testCase.Run(t)
+}
+
+func TestDefaultNetworkDnsNoLocalhost(t *testing.T) {
+	nerdtest.Setup()
+	testCase := &test.Case{
+		Require: require.Not(require.Windows),
+		Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+			return helpers.Command("run", "--rm",
+				testutil.AlpineImage, "grep", "-E", "^nameserver\\s+(127\\.|::1)", "/etc/resolv.conf")
+		},
+		Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
+			return &test.Expected{
+				ExitCode: 1, // no match
 			}
 		},
 	}
@@ -963,27 +1159,18 @@ func TestNoneNetworkDnsConfigs(t *testing.T) {
 	nerdtest.Setup()
 	testCase := &test.Case{
 		Require: require.Not(require.Windows),
-		Setup: func(data test.Data, helpers test.Helpers) {
-			data.Labels().Set("containerName1", data.Identifier())
-		},
-		Cleanup: func(data test.Data, helpers test.Helpers) {
-			helpers.Anyhow("rm", "-f", data.Identifier())
-		},
 		Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
-			return helpers.Command("run", "-d", "--name", data.Identifier(), "--network", "none", "--dns", "0.1.2.3", "--dns-search", "example.com", "--dns-option", "timeout:3", "--dns-option", "attempts:5", testutil.NginxAlpineImage)
+			return helpers.Command("run", "--rm",
+				"--network", "none",
+				"--dns", "0.1.2.3", "--dns-search", "example.com", "--dns-option", "timeout:3", "--dns-option", "attempts:5",
+				testutil.CommonImage, "cat", "/etc/resolv.conf")
 		},
-		Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
-			return &test.Expected{
-				Output: func(stdout string, info string, t *testing.T) {
-					out := helpers.Capture("exec", data.Identifier(), "cat", "/etc/resolv.conf")
-					assert.Assert(t, strings.Contains(out, "0.1.2.3"), info)
-					assert.Assert(t, strings.Contains(out, "example.com"), info)
-					assert.Assert(t, strings.Contains(out, "attempts:5"), info)
-					assert.Assert(t, strings.Contains(out, "timeout:3"), info)
-
-				},
-			}
-		},
+		Expected: test.Expects(0, nil, expect.Contains(
+			"0.1.2.3",
+			"example.com",
+			"attempts:5",
+			"timeout:3",
+		)),
 	}
 	testCase.Run(t)
 }
@@ -992,27 +1179,234 @@ func TestHostNetworkDnsConfigs(t *testing.T) {
 	nerdtest.Setup()
 	testCase := &test.Case{
 		Require: require.Not(require.Windows),
-		Setup: func(data test.Data, helpers test.Helpers) {
-			data.Labels().Set("containerName1", data.Identifier())
-		},
-		Cleanup: func(data test.Data, helpers test.Helpers) {
-			helpers.Anyhow("rm", "-f", data.Identifier())
-		},
 		Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
-			return helpers.Command("run", "-d", "--name", data.Identifier(), "--network", "host", "--dns", "0.1.2.3", "--dns-search", "example.com", "--dns-option", "timeout:3", "--dns-option", "attempts:5", testutil.NginxAlpineImage)
+			return helpers.Command("run", "--rm",
+				"--network", "host",
+				"--dns", "0.1.2.3", "--dns-search", "example.com", "--dns-option", "timeout:3", "--dns-option", "attempts:5",
+				testutil.CommonImage, "cat", "/etc/resolv.conf")
 		},
-		Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
-			return &test.Expected{
-				Output: func(stdout string, info string, t *testing.T) {
-					out := helpers.Capture("exec", data.Identifier(), "cat", "/etc/resolv.conf")
-					assert.Assert(t, strings.Contains(out, "0.1.2.3"), info)
-					assert.Assert(t, strings.Contains(out, "example.com"), info)
-					assert.Assert(t, strings.Contains(out, "attempts:5"), info)
-					assert.Assert(t, strings.Contains(out, "timeout:3"), info)
+		Expected: test.Expects(0, nil, expect.Contains(
+			"0.1.2.3",
+			"example.com",
+			"attempts:5",
+			"timeout:3",
+		)),
+	}
+	testCase.Run(t)
+}
 
+func TestDNSWithGlobalConfig(t *testing.T) {
+	var configContent test.ConfigValue = `debug = false
+debug_full = false
+dns = ["10.10.10.10", "20.20.20.20"]
+dns_opts = ["ndots:2", "timeout:5"]
+dns_search = ["example.com", "test.local"]`
+
+	nerdtest.Setup()
+
+	testCase := &test.Case{
+		Config: test.WithConfig(nerdtest.NerdctlToml, configContent),
+		// NERDCTL_TOML not supported in Docker
+		Require: require.Not(nerdtest.Docker),
+		SubTests: []*test.Case{
+			{
+				Description: "Global DNS settings are used when command line options are not provided",
+				Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+					nerdctlTomlContent := string(helpers.Read(nerdtest.NerdctlToml))
+					helpers.T().Log("NERDCTL_TOML file content:\n%s", nerdctlTomlContent)
+					cmd := helpers.Command("run", "--rm", testutil.CommonImage, "cat", "/etc/resolv.conf")
+					return cmd
 				},
-			}
+				Expected: test.Expects(expect.ExitCodeSuccess, nil, expect.All(
+					expect.Contains("nameserver 10.10.10.10"),
+					expect.Contains("nameserver 20.20.20.20"),
+					expect.Contains("search example.com test.local"),
+					expect.Contains("options ndots:2 timeout:5"),
+				)),
+			},
+			{
+				Description: "Command line DNS options override global config",
+				Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+					nerdctlTomlContent := string(helpers.Read(nerdtest.NerdctlToml))
+					helpers.T().Log("NERDCTL_TOML file content:\n%s", nerdctlTomlContent)
+					cmd := helpers.Command("run", "--rm",
+						"--dns", "9.9.9.9",
+						"--dns-search", "override.com",
+						"--dns-opt", "ndots:3",
+						testutil.CommonImage, "cat", "/etc/resolv.conf")
+					return cmd
+				},
+				Expected: test.Expects(expect.ExitCodeSuccess, nil, expect.All(
+					expect.Contains("nameserver 9.9.9.9"),
+					expect.Contains("search override.com"),
+					expect.Contains("options ndots:3"),
+				)),
+			},
+			{
+				Description: "Global DNS settings should also apply when using host network",
+				Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+					nerdctlTomlContent := string(helpers.Read(nerdtest.NerdctlToml))
+					helpers.T().Log("NERDCTL_TOML file content:\n%s", nerdctlTomlContent)
+					cmd := helpers.Command("run", "--rm", "--network", "host",
+						testutil.CommonImage, "cat", "/etc/resolv.conf")
+					return cmd
+				},
+				Expected: test.Expects(expect.ExitCodeSuccess, nil, expect.All(
+					expect.Contains("nameserver 10.10.10.10"),
+					expect.Contains("nameserver 20.20.20.20"),
+					expect.Contains("search example.com test.local"),
+					expect.Contains("options ndots:2 timeout:5"),
+				)),
+			},
+			{
+				Description: "Global DNS settings should also apply when using none network",
+				Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+					nerdctlTomlContent := string(helpers.Read(nerdtest.NerdctlToml))
+					helpers.T().Log("NERDCTL_TOML file content:\n%s", nerdctlTomlContent)
+					cmd := helpers.Command("run", "--rm", "--network", "none",
+						testutil.CommonImage, "cat", "/etc/resolv.conf")
+					return cmd
+				},
+				Expected: test.Expects(expect.ExitCodeSuccess, nil, expect.All(
+					expect.Contains("nameserver 10.10.10.10"),
+					expect.Contains("nameserver 20.20.20.20"),
+					expect.Contains("search example.com test.local"),
+					expect.Contains("options ndots:2 timeout:5"),
+				)),
+			},
 		},
 	}
+	testCase.Run(t)
+}
+
+// TestReservePorts tests that a published port appears
+// as a listening port on the host.
+// See https://github.com/containerd/nerdctl/pull/4526
+func TestReservePorts(t *testing.T) {
+	nerdtest.Setup()
+	testCase := &test.Case{
+		Require: require.All(
+			require.Not(require.Windows),
+			require.Not(nerdtest.RootlessWithoutDetachNetNS), // RootlessKit v1
+		),
+		NoParallel: true,
+		SubTests: []*test.Case{
+			{
+				Description: "TCP",
+				Setup: func(data test.Data, helpers test.Helpers) {
+					helpers.Ensure("run", "-d", "--name", data.Identifier("nginx"),
+						"-p", "60080:80", testutil.NginxAlpineImage)
+					nerdtest.EnsureContainerStarted(helpers, data.Identifier("nginx"))
+					time.Sleep(3 * time.Second)
+				},
+				Cleanup: func(data test.Data, helpers test.Helpers) {
+					helpers.Anyhow("rm", "-f", data.Identifier("nginx"))
+				},
+				Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+					return helpers.Command("run", "--rm",
+						"--network=host", testutil.CommonImage, "netstat", "-lnt")
+				},
+				Expected: test.Expects(expect.ExitCodeSuccess, nil, expect.All(
+					expect.Contains(":60080"),
+				)),
+			},
+			{
+				Description: "UDP",
+				Setup: func(data test.Data, helpers test.Helpers) {
+					helpers.Ensure("run", "-d", "--name", data.Identifier("coredns"),
+						"-p", "60053:53/udp", testutil.CoreDNSImage)
+					nerdtest.EnsureContainerStarted(helpers, data.Identifier("coredns"))
+					time.Sleep(3 * time.Second)
+				},
+				Cleanup: func(data test.Data, helpers test.Helpers) {
+					helpers.Anyhow("rm", "-f", data.Identifier("coredns"))
+				},
+				Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+					return helpers.Command("run", "--rm",
+						"--network=host", testutil.CommonImage, "netstat", "-lnu")
+				},
+				Expected: test.Expects(expect.ExitCodeSuccess, nil, expect.All(
+					expect.Contains(":60053"),
+				)),
+			},
+		},
+	}
+	testCase.Run(t)
+}
+
+func TestRunExposeOnly(t *testing.T) {
+	testCase := nerdtest.Setup()
+
+	testCase.Setup = func(data test.Data, helpers test.Helpers) {
+		data.Labels().Set("containerName", data.Identifier())
+		helpers.Ensure("run", "-d", "--name", data.Labels().Get("containerName"), "--expose", "8089", testutil.NginxAlpineImage)
+	}
+
+	testCase.Cleanup = func(data test.Data, helpers test.Helpers) {
+		helpers.Anyhow("rm", "-f", data.Labels().Get("containerName"))
+	}
+
+	testCase.SubTests = []*test.Case{
+		{
+			Description: "exposed ports are shown in inspect",
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				return helpers.Command("inspect", data.Labels().Get("containerName"), "--format", "{{json .Config.ExposedPorts}}")
+			},
+			Expected: test.Expects(expect.ExitCodeSuccess, nil, func(stdout string, t tig.T) {
+				assert.Assert(t, strings.Contains(stdout, `"80/tcp":{}`), stdout)
+				assert.Assert(t, strings.Contains(stdout, `"8089/tcp":{}`), stdout)
+			}),
+		},
+		{
+			Description: "expose does not publish ports",
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				return helpers.Command("port", data.Labels().Get("containerName"))
+			},
+			Expected: test.Expects(expect.ExitCodeSuccess, nil, expect.DoesNotContain("8089/tcp ->")),
+		},
+	}
+
+	testCase.Run(t)
+}
+
+func TestRunExposePublishAll(t *testing.T) {
+	testCase := nerdtest.Setup()
+
+	testCase.Require = require.All(
+		require.Not(nerdtest.Rootless), // Automatic port allocation is only supported in rootful mode.
+	)
+
+	testCase.Setup = func(data test.Data, helpers test.Helpers) {
+		data.Labels().Set("containerName", data.Identifier())
+		helpers.Ensure("run", "-d", "--name", data.Labels().Get("containerName"), "--expose", "8089", "-P", testutil.NginxAlpineImage)
+	}
+
+	testCase.Cleanup = func(data test.Data, helpers test.Helpers) {
+		helpers.Anyhow("rm", "-f", data.Labels().Get("containerName"))
+	}
+
+	testCase.SubTests = []*test.Case{
+		{
+			Description: "exposed ports are shown in inspect",
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				return helpers.Command("inspect", data.Labels().Get("containerName"), "--format", "{{json .Config.ExposedPorts}}")
+			},
+			Expected: test.Expects(expect.ExitCodeSuccess, nil, func(stdout string, t tig.T) {
+				assert.Assert(t, strings.Contains(stdout, `"80/tcp":{}`), stdout)
+				assert.Assert(t, strings.Contains(stdout, `"8089/tcp":{}`), stdout)
+			}),
+		},
+		{
+			Description: "publish-all publishes image and CLI exposed ports",
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				return helpers.Command("port", data.Labels().Get("containerName"))
+			},
+			Expected: test.Expects(expect.ExitCodeSuccess, nil, func(stdout string, t tig.T) {
+				assert.Assert(t, strings.Contains(stdout, "80/tcp ->"), stdout)
+				assert.Assert(t, strings.Contains(stdout, "8089/tcp ->"), stdout)
+			}),
+		},
+	}
+
 	testCase.Run(t)
 }

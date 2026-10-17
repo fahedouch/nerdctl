@@ -17,13 +17,18 @@
 package main
 
 import (
+	"bytes"
 	"errors"
+	"strings"
 	"testing"
+
+	"gotest.tools/v3/assert"
 
 	"github.com/containerd/containerd/v2/defaults"
 	"github.com/containerd/nerdctl/mod/tigron/expect"
 	"github.com/containerd/nerdctl/mod/tigron/require"
 	"github.com/containerd/nerdctl/mod/tigron/test"
+	"github.com/containerd/nerdctl/mod/tigron/tig"
 
 	"github.com/containerd/nerdctl/v2/pkg/testutil"
 	"github.com/containerd/nerdctl/v2/pkg/testutil/nerdtest"
@@ -129,4 +134,121 @@ version = 2`),
 	}
 
 	testCase.Run(t)
+}
+
+// TestLogFile tests https://github.com/containerd/nerdctl/issues/4872
+func TestLogFile(t *testing.T) {
+	testCase := nerdtest.Setup()
+
+	// Docker has no equivalent of --log-file
+	testCase.Require = require.Not(nerdtest.Docker)
+
+	const logFile = "nerdctl.log"
+
+	testCase.SubTests = []*test.Case{
+		{
+			Description: "records the failure that is only reported on the standard error",
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				return helpers.Command("--log-file", data.Temp().Path(logFile), "non-existent-command")
+			},
+			Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
+				return &test.Expected{
+					ExitCode: 1,
+					Errors:   []error{errors.New("unknown subcommand")},
+					Output: func(stdout string, t tig.T) {
+						assert.Assert(t, strings.Contains(data.Temp().Load(logFile), "unknown subcommand"),
+							"log file must contain the error")
+					},
+				}
+			},
+		},
+		{
+			Description: "appends, so that a previous invocation is not lost",
+			Setup: func(data test.Data, helpers test.Helpers) {
+				helpers.Fail("--log-file", data.Temp().Path(logFile), "non-existent-command")
+			},
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				return helpers.Command("--log-file", data.Temp().Path(logFile), "non-existent-command")
+			},
+			Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
+				return &test.Expected{
+					ExitCode: 1,
+					Output: func(stdout string, t tig.T) {
+						assert.Equal(t, strings.Count(data.Temp().Load(logFile), "unknown subcommand"), 2,
+							"log file must hold both invocations")
+					},
+				}
+			},
+		},
+	}
+
+	testCase.Run(t)
+}
+
+func TestRootHelpHidesAliasImplementationFlags(t *testing.T) {
+	app, err := newApp()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	app.SetOut(&stdout)
+	app.SetErr(&stdout)
+	app.SetArgs([]string{"--help"})
+
+	if err := app.Execute(); err != nil {
+		t.Fatal(err)
+	}
+
+	out := stdout.String()
+	for _, unexpected := range []string{
+		"-a, --a",
+		"-H, --H",
+		"-n, --n",
+	} {
+		if strings.Contains(out, unexpected) {
+			t.Fatalf("help output unexpectedly contains %q\n%s", unexpected, out)
+		}
+	}
+	for _, expected := range []string{
+		"--address string           containerd address, optionally with \"unix://\" prefix [$CONTAINERD_ADDRESS] (aliases: -a, -H, --host)",
+		"--namespace string         containerd namespace, such as \"moby\" for Docker, \"k8s.io\" for Kubernetes [$CONTAINERD_NAMESPACE] (aliases: -n)",
+	} {
+		if !strings.Contains(out, expected) {
+			t.Fatalf("help output missing %q\n%s", expected, out)
+		}
+	}
+}
+
+func TestRootHiddenAliasesStillParse(t *testing.T) {
+	app, err := newApp()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var stdout bytes.Buffer
+	app.SetOut(&stdout)
+	app.SetErr(&stdout)
+	app.SetArgs([]string{
+		"-a", "unix:///tmp/a.sock",
+		"-H", "unix:///tmp/h.sock",
+		"--host", "unix:///tmp/host.sock",
+		"-n", "testns",
+		"--storage-driver", "native",
+		"--help",
+	})
+
+	if err := app.Execute(); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := app.Flag("address").Value.String(); got != "unix:///tmp/host.sock" {
+		t.Fatalf("address flag = %q, want %q", got, "unix:///tmp/host.sock")
+	}
+	if got := app.Flag("namespace").Value.String(); got != "testns" {
+		t.Fatalf("namespace flag = %q, want %q", got, "testns")
+	}
+	if got := app.Flag("snapshotter").Value.String(); got != "native" {
+		t.Fatalf("snapshotter flag = %q, want %q", got, "native")
+	}
 }

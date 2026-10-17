@@ -19,8 +19,7 @@ package image
 import (
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -31,19 +30,81 @@ import (
 	"github.com/containerd/nerdctl/mod/tigron/expect"
 	"github.com/containerd/nerdctl/mod/tigron/require"
 	"github.com/containerd/nerdctl/mod/tigron/test"
+	"github.com/containerd/nerdctl/mod/tigron/tig"
 
+	"github.com/containerd/nerdctl/v2/pkg/referenceutil"
 	"github.com/containerd/nerdctl/v2/pkg/tabutil"
 	"github.com/containerd/nerdctl/v2/pkg/testutil"
 	"github.com/containerd/nerdctl/v2/pkg/testutil/nerdtest"
 )
 
+// padRow widens a row of a table back to the width of its header, so that its last column can be
+// read. tabutil indexes the columns by byte offset and slices without checking the bounds, and a
+// row can be shorter than the header in two ways: the trailing column is empty, and the padding of
+// the very last line is gone once the output has been trimmed.
+func padRow(header, row string) string {
+	if pad := len(header) - len(row); pad > 0 {
+		return row + strings.Repeat(" ", pad)
+	}
+	return row
+}
+
+// TestNameFilterFor is a regression test for
+// https://github.com/containerd/nerdctl/issues/5113: `nerdctl image ls
+// myapp`, where myapp is a bare repository name, returned nothing unless
+// myapp had a `:latest` tag, because referenceutil.Parse normalizes a bare
+// repository name to an implicit ":latest" tag and the resulting exact-match
+// filter therefore only ever matched that one tag.
+func TestNameFilterFor(t *testing.T) {
+	testCases := []struct {
+		name     string
+		arg      string
+		expected []string
+	}{
+		{
+			name:     "bare repository name matches any tag",
+			arg:      "myapp",
+			expected: []string{`name~=^docker\.io/library/myapp:`},
+		},
+		{
+			name:     "explicit tag matches exactly",
+			arg:      "myapp:v1",
+			expected: []string{"name==docker.io/library/myapp:v1"},
+		},
+		{
+			name:     "explicit latest tag matches exactly",
+			arg:      "myapp:latest",
+			expected: []string{"name==docker.io/library/myapp:latest"},
+		},
+		{
+			name:     "digest matches exactly",
+			arg:      "myapp@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+			expected: []string{"name==docker.io/library/myapp@sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+		},
+		{
+			name:     "bare repository name with domain and path is escaped for the regex",
+			arg:      "registry.example.com/foo/my.app",
+			expected: []string{`name~=^registry\.example\.com/foo/my\.app:`},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			parsedReference, err := referenceutil.Parse(tc.arg)
+			assert.NilError(t, err)
+			assert.DeepEqual(t, tc.expected, nameFilterFor(parsedReference))
+		})
+	}
+}
+
 func TestImages(t *testing.T) {
 	nerdtest.Setup()
 
+	commonImage, _ := referenceutil.Parse(testutil.CommonImage)
+
 	testCase := &test.Case{
-		Require: require.Not(nerdtest.Docker),
 		Setup: func(data test.Data, helpers test.Helpers) {
-			helpers.Ensure("pull", "--quiet", testutil.CommonImage)
+			helpers.Ensure("pull", "--quiet", commonImage.String())
 			helpers.Ensure("pull", "--quiet", testutil.NginxAlpineImage)
 		},
 		SubTests: []*test.Case{
@@ -52,53 +113,50 @@ func TestImages(t *testing.T) {
 				Command:     test.Command("images"),
 				Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
 					return &test.Expected{
-						Output: func(stdout string, info string, t *testing.T) {
+						Output: func(stdout string, t tig.T) {
 							lines := strings.Split(strings.TrimSpace(stdout), "\n")
-							assert.Assert(t, len(lines) >= 2, info)
-							header := "REPOSITORY\tTAG\tIMAGE ID\tCREATED\tPLATFORM\tSIZE\tBLOB SIZE"
-							if nerdtest.IsDocker() {
-								header = "REPOSITORY\tTAG\tIMAGE ID\tCREATED\tSIZE"
-							}
-							tab := tabutil.NewReader(header)
+							assert.Assert(t, len(lines) >= 2, "there should be at least two lines\n")
+							tab := tabutil.NewReader("IMAGE\tID\tDISK USAGE\tCONTENT SIZE\tEXTRA")
 							err := tab.ParseHeader(lines[0])
-							assert.NilError(t, err, info)
+							assert.NilError(t, err, "ParseHeader should not fail\n")
 							found := false
 							for _, line := range lines[1:] {
-								repo, _ := tab.ReadRow(line, "REPOSITORY")
-								tag, _ := tab.ReadRow(line, "TAG")
-								if repo+":"+tag == testutil.CommonImage {
+								image, _ := tab.ReadRow(line, "IMAGE")
+								if image == commonImage.FamiliarName()+":"+commonImage.Tag {
 									found = true
 									break
 								}
 							}
-							assert.Assert(t, found, info)
+							assert.Assert(t, found, "we should have found an image\n")
 						},
 					}
 				},
 			},
 			{
 				Description: "With names",
-				Command:     test.Command("images", "--names", testutil.CommonImage),
+				// --names is a nerdctl-specific flag; Docker does not support it.
+				Require: require.Not(nerdtest.Docker),
+				Command: test.Command("images", "--names", commonImage.String()),
 				Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
 					return &test.Expected{
 						Output: expect.All(
-							expect.Contains(testutil.CommonImage),
-							func(stdout string, info string, t *testing.T) {
+							expect.Contains(commonImage.String()),
+							func(stdout string, t tig.T) {
 								lines := strings.Split(strings.TrimSpace(stdout), "\n")
-								assert.Assert(t, len(lines) >= 2, info)
+								assert.Assert(t, len(lines) >= 2, "there should be at least two lines\n")
 								tab := tabutil.NewReader("NAME\tIMAGE ID\tCREATED\tPLATFORM\tSIZE\tBLOB SIZE")
 								err := tab.ParseHeader(lines[0])
-								assert.NilError(t, err, info)
+								assert.NilError(t, err, "ParseHeader should not fail\n")
 								found := false
 								for _, line := range lines[1:] {
 									name, _ := tab.ReadRow(line, "NAME")
-									if name == testutil.CommonImage {
+									if name == commonImage.String() {
 										found = true
 										break
 									}
 								}
 
-								assert.Assert(t, found, info)
+								assert.Assert(t, found, "we should have found an image\n")
 							},
 						),
 					}
@@ -109,12 +167,104 @@ func TestImages(t *testing.T) {
 				Command:     test.Command("images", "--format", "'{{json .CreatedAt}}'"),
 				Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
 					return &test.Expected{
-						Output: func(stdout string, info string, t *testing.T) {
+						Output: func(stdout string, t tig.T) {
 							lines := strings.Split(strings.TrimSpace(stdout), "\n")
-							assert.Assert(t, len(lines) >= 2, info)
+							assert.Assert(t, len(lines) >= 2, "there should be at least two lines\n")
 							createdTimes := lines
 							slices.Reverse(createdTimes)
-							assert.Assert(t, slices.IsSorted(createdTimes), info)
+							assert.Assert(t, slices.IsSorted(createdTimes), "created times should be sorted\n")
+						},
+					}
+				},
+			},
+			{
+				Description: "In use",
+				Setup: func(data test.Data, helpers test.Helpers) {
+					// Tag the image under a second name: in-use is resolved by target digest, so
+					// every reference to that target must be flagged, not just the one the
+					// container was created from.
+					helpers.Ensure("tag", commonImage.String(), data.Identifier()+":alias")
+					helpers.Ensure("run", "-d", "--quiet", "--name", data.Identifier(), commonImage.String(), "sleep", nerdtest.Infinity)
+				},
+				Cleanup: func(data test.Data, helpers test.Helpers) {
+					helpers.Anyhow("rm", "-f", data.Identifier())
+					helpers.Anyhow("rmi", "-f", data.Identifier()+":alias")
+				},
+				Command: test.Command("images"),
+				Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
+					return &test.Expected{
+						Output: func(stdout string, t tig.T) {
+							lines := strings.Split(strings.TrimSpace(stdout), "\n")
+							assert.Assert(t, len(lines) >= 2, "there should be at least two lines\n")
+							tab := tabutil.NewReader("IMAGE\tID\tDISK USAGE\tCONTENT SIZE\tEXTRA")
+							err := tab.ParseHeader(lines[0])
+							assert.NilError(t, err, "ParseHeader should not fail\n")
+							// Docker collapses all the names of an image into a single row, while
+							// nerdctl has one row per image record, so just require that every row
+							// referring to that target is marked.
+							found := 0
+							for _, line := range lines[1:] {
+								image, _ := tab.ReadRow(line, "IMAGE")
+								if image != commonImage.FamiliarName()+":"+commonImage.Tag &&
+									image != data.Identifier()+":alias" {
+									continue
+								}
+								extra, _ := tab.ReadRow(line, "EXTRA")
+								assert.Equal(t, extra, "U", "the in-use image should be marked with U: "+image)
+								found++
+							}
+							assert.Assert(t, found > 0, "we should have found the in-use image\n")
+						},
+					}
+				},
+			},
+			{
+				Description: "In use survives a retag",
+				Setup: func(data test.Data, helpers test.Helpers) {
+					// Run a container off a private tag, then move that tag onto another image.
+					// The container still runs the original image, so that is the one that must
+					// stay marked as in use.
+					helpers.Ensure("tag", commonImage.String(), data.Identifier()+":moving")
+					helpers.Ensure("run", "-d", "--quiet", "--name", data.Identifier(),
+						data.Identifier()+":moving", "sleep", nerdtest.Infinity)
+					helpers.Ensure("tag", testutil.NginxAlpineImage, data.Identifier()+":moving")
+
+					nginx, _ := referenceutil.Parse(testutil.NginxAlpineImage)
+					data.Labels().Set("retaggedTo", nginx.FamiliarName()+":"+nginx.Tag)
+				},
+				Cleanup: func(data test.Data, helpers test.Helpers) {
+					helpers.Anyhow("rm", "-f", data.Identifier())
+					helpers.Anyhow("rmi", "-f", data.Identifier()+":moving")
+				},
+				Command: test.Command("images"),
+				Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
+					return &test.Expected{
+						Output: func(stdout string, t tig.T) {
+							lines := strings.Split(strings.TrimSpace(stdout), "\n")
+							assert.Assert(t, len(lines) >= 2, "there should be at least two lines\n")
+							tab := tabutil.NewReader("IMAGE\tID\tDISK USAGE\tCONTENT SIZE\tEXTRA")
+							err := tab.ParseHeader(lines[0])
+							assert.NilError(t, err, "ParseHeader should not fail\n")
+
+							original := commonImage.FamiliarName() + ":" + commonImage.Tag
+							retagged := data.Labels().Get("retaggedTo")
+							seen := 0
+							for _, line := range lines[1:] {
+								line = padRow(lines[0], line)
+								image, _ := tab.ReadRow(line, "IMAGE")
+								extra, _ := tab.ReadRow(line, "EXTRA")
+								switch image {
+								case original:
+									assert.Equal(t, extra, "U",
+										"the image the container runs must stay in use: "+image)
+									seen++
+								case retagged:
+									assert.Equal(t, extra, "",
+										"the image the tag now points at is not in use: "+image)
+									seen++
+								}
+							}
+							assert.Equal(t, seen, 2, "both images should be listed\n")
 						},
 					}
 				},
@@ -123,10 +273,7 @@ func TestImages(t *testing.T) {
 	}
 
 	if runtime.GOOS == "windows" {
-		testCase.Require = require.All(
-			testCase.Require,
-			nerdtest.IsFlaky("https://github.com/containerd/nerdctl/issues/3524"),
-		)
+		testCase.Require = nerdtest.IsFlaky("https://github.com/containerd/nerdctl/issues/3524")
 	}
 
 	testCase.Run(t)
@@ -135,22 +282,23 @@ func TestImages(t *testing.T) {
 func TestImagesFilter(t *testing.T) {
 	nerdtest.Setup()
 
+	commonImage, _ := referenceutil.Parse(testutil.CommonImage)
+
 	testCase := &test.Case{
 		Require: nerdtest.Build,
 		Setup: func(data test.Data, helpers test.Helpers) {
-			helpers.Ensure("pull", "--quiet", testutil.CommonImage)
-			helpers.Ensure("tag", testutil.CommonImage, "taggedimage:one-fragment-one")
-			helpers.Ensure("tag", testutil.CommonImage, "taggedimage:two-fragment-two")
+			helpers.Ensure("pull", "--quiet", commonImage.String())
+			helpers.Ensure("tag", commonImage.String(), "taggedimage:one-fragment-one")
+			helpers.Ensure("tag", commonImage.String(), "taggedimage:two-fragment-two")
 
 			dockerfile := fmt.Sprintf(`FROM %s
 CMD ["echo", "nerdctl-build-test-string"] \n
 LABEL foo=bar
 LABEL version=0.1
 RUN echo "actually creating a layer so that docker sets the createdAt time"
-`, testutil.CommonImage)
+`, commonImage.String())
 			buildCtx := data.Temp().Path()
-			err := os.WriteFile(filepath.Join(buildCtx, "Dockerfile"), []byte(dockerfile), 0o600)
-			assert.NilError(helpers.T(), err)
+			data.Temp().Save(dockerfile, "Dockerfile")
 			data.Labels().Set("buildCtx", buildCtx)
 		},
 		Cleanup: func(data test.Data, helpers test.Helpers) {
@@ -237,47 +385,45 @@ RUN echo "actually creating a layer so that docker sets the createdAt time"
 				Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
 					return &test.Expected{
 						Output: expect.All(
-							expect.Contains(testutil.ImageRepo(testutil.CommonImage)),
+							expect.Contains(commonImage.FamiliarName(), commonImage.Tag),
 							expect.DoesNotContain(data.Labels().Get("builtImageID")),
 						),
 					}
 				},
 			},
 			{
-				Description: "since=" + testutil.CommonImage,
-				Command:     test.Command("images", "--filter", fmt.Sprintf("since=%s", testutil.CommonImage)),
+				Description: "since=" + commonImage.String(),
+				Command:     test.Command("images", "--filter", fmt.Sprintf("since=%s", commonImage.String())),
 				Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
 					return &test.Expected{
 						Output: expect.All(
 							expect.Contains(data.Labels().Get("builtImageID")),
-							expect.DoesNotContain(testutil.ImageRepo(testutil.CommonImage)),
+							expect.DoesNotMatch(regexp.MustCompile(commonImage.FamiliarName()+"[\\s]+"+commonImage.Tag)),
 						),
 					}
 				},
 			},
 			{
-				Description: "since=" + testutil.CommonImage + " " + testutil.CommonImage,
-				Command:     test.Command("images", "--filter", fmt.Sprintf("since=%s", testutil.CommonImage), testutil.CommonImage),
+				Description: "since=" + commonImage.String() + " " + commonImage.String(),
+				Command:     test.Command("images", "--filter", fmt.Sprintf("since=%s", commonImage.String()), commonImage.String()),
 				Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
 					return &test.Expected{
-						Output: expect.DoesNotContain(
-							data.Labels().Get("builtImageID"),
-							testutil.ImageRepo(testutil.CommonImage),
+						Output: expect.All(
+							expect.DoesNotContain(data.Labels().Get("builtImageID")),
+							expect.DoesNotMatch(regexp.MustCompile(commonImage.FamiliarName()+"[\\s]+"+commonImage.Tag)),
 						),
 					}
 				},
 			},
 			{
 				Description: "since=non-exists-image",
-				Require:     nerdtest.NerdctlNeedsFixing("https://github.com/containerd/nerdctl/issues/3511"),
 				Command:     test.Command("images", "--filter", "since=non-exists-image"),
-				Expected:    test.Expects(expect.ExitCodeGenericFail, []error{errors.New("No such image: ")}, nil),
+				Expected:    test.Expects(expect.ExitCodeGenericFail, []error{errors.New("no such image: ")}, nil),
 			},
 			{
 				Description: "before=non-exists-image",
-				Require:     nerdtest.NerdctlNeedsFixing("https://github.com/containerd/nerdctl/issues/3511"),
 				Command:     test.Command("images", "--filter", "before=non-exists-image"),
-				Expected:    test.Expects(expect.ExitCodeGenericFail, []error{errors.New("No such image: ")}, nil),
+				Expected:    test.Expects(expect.ExitCodeGenericFail, []error{errors.New("no such image: ")}, nil),
 			},
 		},
 	}
@@ -298,8 +444,7 @@ func TestImagesFilterDangling(t *testing.T) {
 CMD ["echo", "nerdctl-build-notag-string"]
 	`, testutil.CommonImage)
 			buildCtx := data.Temp().Path()
-			err := os.WriteFile(filepath.Join(buildCtx, "Dockerfile"), []byte(dockerfile), 0o600)
-			assert.NilError(helpers.T(), err)
+			data.Temp().Save(dockerfile, "Dockerfile")
 			data.Labels().Set("buildCtx", buildCtx)
 		},
 		Cleanup: func(data test.Data, helpers test.Helpers) {
@@ -314,12 +459,15 @@ CMD ["echo", "nerdctl-build-notag-string"]
 			{
 				Description: "dangling",
 				Command:     test.Command("images", "--filter", "dangling=true"),
-				Expected:    test.Expects(0, nil, expect.Contains("<none>")),
+				Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
+					// The Docker v29 default view (used here, no --format) renders dangling images as <untagged>.
+					return test.Expects(0, nil, expect.Contains("<untagged>"))(data, helpers)
+				},
 			},
 			{
 				Description: "not dangling",
 				Command:     test.Command("images", "--filter", "dangling=false"),
-				Expected:    test.Expects(0, nil, expect.DoesNotContain("<none>")),
+				Expected:    test.Expects(0, nil, expect.DoesNotContain("<untagged>", "<none>")),
 			},
 		},
 	}
@@ -343,24 +491,19 @@ func TestImagesKubeWithKubeHideDupe(t *testing.T) {
 				Command:     test.Command("--kube-hide-dupe", "images"),
 				Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
 					return &test.Expected{
-						Output: func(stdout string, info string, t *testing.T) {
+						Output: func(stdout string, t tig.T) {
 							var imageID string
 							var skipLine int
 							lines := strings.Split(strings.TrimSpace(stdout), "\n")
-							header := "REPOSITORY\tTAG\tIMAGE ID\tCREATED\tPLATFORM\tSIZE\tBLOB SIZE"
-							if nerdtest.IsDocker() {
-								header = "REPOSITORY\tTAG\tIMAGE ID\tCREATED\tSIZE"
-							}
-							tab := tabutil.NewReader(header)
+							tab := tabutil.NewReader("IMAGE\tID\tDISK USAGE\tCONTENT SIZE\tEXTRA")
 							err := tab.ParseHeader(lines[0])
-							assert.NilError(t, err, info)
+							assert.NilError(t, err, "ParseHeader should not fail\n")
 							found := true
 							for i, line := range lines[1:] {
-								repo, _ := tab.ReadRow(line, "REPOSITORY")
-								tag, _ := tab.ReadRow(line, "TAG")
-								if repo+":"+tag == testutil.BusyboxImage {
+								image, _ := tab.ReadRow(line, "IMAGE")
+								if image == testutil.BusyboxImage {
 									skipLine = i
-									imageID, _ = tab.ReadRow(line, "IMAGE ID")
+									imageID, _ = tab.ReadRow(line, "ID")
 									break
 								}
 							}
@@ -368,13 +511,13 @@ func TestImagesKubeWithKubeHideDupe(t *testing.T) {
 								if i == skipLine {
 									continue
 								}
-								id, _ := tab.ReadRow(line, "IMAGE ID")
+								id, _ := tab.ReadRow(line, "ID")
 								if id == imageID {
 									found = false
 									break
 								}
 							}
-							assert.Assert(t, found, info)
+							assert.Assert(t, found, "We should have found the image\n")
 						},
 					}
 				},
@@ -384,7 +527,7 @@ func TestImagesKubeWithKubeHideDupe(t *testing.T) {
 				Command:     test.Command("images"),
 				Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
 					return &test.Expected{
-						Output: expect.Contains("<none>"),
+						Output: expect.Contains("<untagged>"),
 					}
 				},
 			},

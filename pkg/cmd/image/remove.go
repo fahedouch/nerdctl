@@ -22,15 +22,27 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/opencontainers/go-digest"
+
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/errdefs"
 	"github.com/containerd/log"
-	"github.com/containerd/platforms"
 
 	"github.com/containerd/nerdctl/v2/pkg/api/types"
 	"github.com/containerd/nerdctl/v2/pkg/containerutil"
 	"github.com/containerd/nerdctl/v2/pkg/idutil/imagewalker"
+	"github.com/containerd/nerdctl/v2/pkg/platformutil"
 )
+
+// danglingRefName builds a dangling-image name unique to the given digest, so that
+// force-removing more than one running image's image in the same invocation does not
+// collide on image creation: containerd's image store requires unique names, and a
+// fixed ":" name is shared by every dangling ref. See:
+// https://github.com/containerd/nerdctl/issues/4109
+func danglingRefName(dgst digest.Digest) string {
+	return ":" + dgst.String()
+}
 
 // Remove removes a list of `images`.
 func Remove(ctx context.Context, client *containerd.Client, args []string, options types.ImageRemoveOptions) error {
@@ -41,6 +53,10 @@ func Remove(ctx context.Context, client *containerd.Client, args []string, optio
 
 	cs := client.ContentStore()
 	is := client.ImageService()
+	platformMatcher, err := platformutil.NewMatchComparer(false, nil)
+	if err != nil {
+		return err
+	}
 	containerList, err := client.Containers(ctx)
 	if err != nil {
 		return err
@@ -80,10 +96,12 @@ func Remove(ctx context.Context, client *containerd.Client, args []string, optio
 			if cid, ok := runningImages[found.Image.Name]; ok {
 				if options.Force {
 					// This is a running image, so, we need to keep a ref on it so that containerd does not GC the layers
-					// First create the new image with an empty name
+					// First create the new image with a dangling name unique to its digest: a fixed ":" name
+					// collides ("image \":\": already exists") when force-removing more than one running
+					// image's image in the same invocation.
 					originalName := found.Image.Name
-					found.Image.Name = ":"
-					if _, err = is.Create(ctx, found.Image); err != nil {
+					found.Image.Name = danglingRefName(found.Image.Target.Digest)
+					if _, err = is.Create(ctx, found.Image); err != nil && !errdefs.IsAlreadyExists(err) {
 						return err
 					}
 
@@ -103,7 +121,7 @@ func Remove(ctx context.Context, client *containerd.Client, args []string, optio
 				return fmt.Errorf("conflict: unable to delete %s (must be forced) - image is being used by stopped container %s", found.Req, cid)
 			}
 			// digests is used only for emulating human-readable output of `docker rmi`
-			digests, err := found.Image.RootFS(ctx, cs, platforms.DefaultStrict())
+			digests, err := found.Image.RootFS(ctx, cs, platformMatcher)
 			if err != nil {
 				log.G(ctx).WithError(err).Warning("failed to enumerate rootfs")
 			}
@@ -133,10 +151,12 @@ func Remove(ctx context.Context, client *containerd.Client, args []string, optio
 			if cid, ok := runningImages[found.Image.Name]; ok {
 				if options.Force {
 					// This is a running image, so, we need to keep a ref on it so that containerd does not GC the layers
-					// First create the new image with an empty name
+					// First create the new image with a dangling name unique to its digest: a fixed ":" name
+					// collides ("image \":\": already exists") when force-removing more than one running
+					// image's image in the same invocation.
 					originalName := found.Image.Name
-					found.Image.Name = ":"
-					if _, err = is.Create(ctx, found.Image); err != nil {
+					found.Image.Name = danglingRefName(found.Image.Target.Digest)
+					if _, err = is.Create(ctx, found.Image); err != nil && !errdefs.IsAlreadyExists(err) {
 						return false, err
 					}
 
@@ -156,7 +176,7 @@ func Remove(ctx context.Context, client *containerd.Client, args []string, optio
 				return false, fmt.Errorf("conflict: unable to delete %s (must be forced) - image is being used by stopped container %s", found.Req, cid)
 			}
 			// digests is used only for emulating human-readable output of `docker rmi`
-			digests, err := found.Image.RootFS(ctx, cs, platforms.DefaultStrict())
+			digests, err := found.Image.RootFS(ctx, cs, platformMatcher)
 			if err != nil {
 				log.G(ctx).WithError(err).Warning("failed to enumerate rootfs")
 			}

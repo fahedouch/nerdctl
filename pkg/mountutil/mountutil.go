@@ -39,6 +39,7 @@ const (
 	Bind          = "bind"
 	Volume        = "volume"
 	Tmpfs         = "tmpfs"
+	Image         = "image"
 	Npipe         = "npipe"
 	pathSeparator = string(os.PathSeparator)
 )
@@ -50,6 +51,17 @@ type Processed struct {
 	AnonymousVolume string // anonymous volume name
 	Mode            string
 	Opts            []oci.SpecOpts
+	VolumeNoCopy    bool
+	// ImageMountSnapshot is the snapshotter key of the read-only view for a
+	// type=image mount; empty for other mount types.
+	ImageMountSnapshot string
+	// ImageSubpath is the relative path inside a type=image rootfs to expose at
+	// the destination, instead of the whole rootfs. Empty means the whole rootfs.
+	ImageSubpath string
+	// ImageMountHostpath is the host directory where a type=image rootfs is
+	// materialized so an image-subpath can be bind-mounted from it. It must be
+	// unmounted and removed on container deletion. Empty when no subpath is used.
+	ImageMountHostpath string
 }
 
 type volumeSpec struct {
@@ -59,7 +71,10 @@ type volumeSpec struct {
 	AnonymousVolume string
 }
 
-func ProcessFlagV(s string, volStore volumestore.VolumeStore, createDir bool) (*Processed, error) {
+// ProcessFlagV processes the value of the `-v` flag.
+// ociRuntime is the value of the `--runtime` flag, used for detecting whether the
+// OCI runtime supports recursive read-only mounts.
+func ProcessFlagV(s string, volStore volumestore.VolumeStore, createDir bool, ociRuntime string) (*Processed, error) {
 	var (
 		res      *Processed
 		volSpec  volumeSpec
@@ -119,7 +134,7 @@ func ProcessFlagV(s string, volStore volumestore.VolumeStore, createDir bool) (*
 
 			rawOpts := res.Mode
 
-			options, res.Opts, err = getVolumeOptions(src, res.Type, rawOpts)
+			options, res.Opts, err = getVolumeOptions(src, res.Type, rawOpts, ociRuntime)
 			if err != nil {
 				return nil, err
 			}
@@ -215,16 +230,12 @@ func handleNamedVolumes(source string, volStore volumestore.VolumeStore) (volume
 	return res, nil
 }
 
-func getVolumeOptions(src string, vType string, rawOpts string) ([]string, []oci.SpecOpts, error) {
+func getVolumeOptions(src, vType, rawOpts, ociRuntime string) ([]string, []oci.SpecOpts, error) {
 	// always call parseVolumeOptions for bind mount to allow the parser to add some default options
-	var err error
-	var specOpts []oci.SpecOpts
-	options, specOpts, err := parseVolumeOptions(vType, src, rawOpts)
+	options, specOpts, err := parseVolumeOptions(vType, src, rawOpts, ociRuntime)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to parse volume options (%q, %q, %q): %w", vType, src, rawOpts, err)
 	}
-
-	specOpts = append(specOpts, specOpts...)
 	return options, specOpts, nil
 }
 

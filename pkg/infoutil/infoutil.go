@@ -25,8 +25,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Masterminds/semver/v3"
-	"github.com/docker/docker/pkg/sysinfo"
+	"github.com/moby/moby/v2/pkg/sysinfo"
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/introspection"
@@ -36,6 +35,7 @@ import (
 	"github.com/containerd/nerdctl/v2/pkg/buildkitutil"
 	"github.com/containerd/nerdctl/v2/pkg/inspecttypes/dockercompat"
 	"github.com/containerd/nerdctl/v2/pkg/inspecttypes/native"
+	"github.com/containerd/nerdctl/v2/pkg/rootlessutil"
 	"github.com/containerd/nerdctl/v2/pkg/version"
 )
 
@@ -63,7 +63,7 @@ func NativeDaemonInfo(ctx context.Context, client *containerd.Client) (*native.D
 	return daemonInfo, nil
 }
 
-func Info(ctx context.Context, client *containerd.Client, snapshotter, cgroupManager string) (*dockercompat.Info, error) {
+func Info(ctx context.Context, client *containerd.Client, snapshotter, cgroupManager string, selinuxEnabled bool) (*dockercompat.Info, error) {
 	daemonVersion, err := client.Version(ctx)
 	if err != nil {
 		return nil, err
@@ -96,7 +96,7 @@ func Info(ctx context.Context, client *containerd.Client, snapshotter, cgroupMan
 		return nil, err
 	}
 	info.ServerVersion = daemonVersion.Version
-	fulfillPlatformInfo(&info)
+	fulfillPlatformInfo(&info, selinuxEnabled)
 	return &info, nil
 }
 
@@ -143,19 +143,10 @@ func ServerVersion(ctx context.Context, client *containerd.Client) (*dockercompa
 			runcVersion(),
 		},
 	}
+	if rootlessutil.IsRootless() {
+		v.Components = append(v.Components, rootlessKitVersion(ctx))
+	}
 	return v, nil
-}
-
-func ServerSemVer(ctx context.Context, client *containerd.Client) (*semver.Version, error) {
-	v, err := client.Version(ctx)
-	if err != nil {
-		return nil, err
-	}
-	sv, err := semver.NewVersion(v.Version)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse the containerd version %q: %w", v.Version, err)
-	}
-	return sv, nil
 }
 
 func buildctlVersion() dockercompat.ComponentVersion {
@@ -246,6 +237,35 @@ func parseRuncVersion(runcVersionStdout []byte) (*dockercompat.ComponentVersion,
 }
 
 // getMobySysInfo returns the moby system info for the given cgroup manager
+
+func rootlessKitVersion(ctx context.Context) dockercompat.ComponentVersion {
+	rc, err := rootlessutil.NewRootlessKitClient()
+	if err != nil {
+		log.L.WithError(err).Warnf("unable to connect to RootlessKit API socket")
+		return dockercompat.ComponentVersion{Name: "rootlesskit"}
+	}
+	info, err := rc.Info(ctx)
+	if err != nil {
+		log.L.WithError(err).Warnf("unable to retrieve RootlessKit version via API")
+		return dockercompat.ComponentVersion{Name: "rootlesskit"}
+	}
+	details := map[string]string{
+		"ApiVersion": info.APIVersion,
+		"StateDir":   info.StateDir,
+	}
+	if info.NetworkDriver != nil {
+		details["NetworkDriver"] = info.NetworkDriver.Driver
+	}
+	if info.PortDriver != nil {
+		details["PortDriver"] = info.PortDriver.Driver
+	}
+	return dockercompat.ComponentVersion{
+		Name:    "rootlesskit",
+		Version: info.Version,
+		Details: details,
+	}
+}
+
 func getMobySysInfo(cgroupManager string) *sysinfo.SysInfo {
 	var info dockercompat.Info
 	info.CgroupVersion = CgroupsVersion()

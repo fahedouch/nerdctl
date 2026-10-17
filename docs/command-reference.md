@@ -4,21 +4,21 @@
 
 :nerd_face: = nerdctl specific
 
-:blue_square: = Windows enabled
-
-Unlisted `docker` CLI flags are unimplemented yet in `nerdctl` CLI.
-It does not necessarily mean that the corresponding features are missing in containerd.
+> [!NOTE]
+> - Unlisted `docker` CLI flags are unimplemented yet in `nerdctl` CLI.
+>   It does not necessarily mean that the corresponding features are missing in containerd.
+> - Some commands and flags are only available on Linux.
 
 <!-- START doctoc generated TOC please keep comment here to allow auto update -->
 <!-- DON'T EDIT THIS SECTION, INSTEAD RE-RUN doctoc TO UPDATE -->
 
 - [Container management](#container-management)
-  - [:whale: :blue_square: nerdctl run](#whale-blue_square-nerdctl-run)
-  - [:whale: :blue_square: nerdctl exec](#whale-blue_square-nerdctl-exec)
-  - [:whale: :blue_square: nerdctl create](#whale-blue_square-nerdctl-create)
+  - [:whale: nerdctl run](#whale-nerdctl-run)
+  - [:whale: nerdctl exec](#whale-nerdctl-exec)
+  - [:whale: nerdctl create](#whale-nerdctl-create)
   - [:whale: nerdctl cp](#whale-nerdctl-cp)
-  - [:whale: :blue_square: nerdctl ps](#whale-blue_square-nerdctl-ps)
-  - [:whale: :blue_square: nerdctl inspect](#whale-blue_square-nerdctl-inspect)
+  - [:whale: nerdctl ps](#whale-nerdctl-ps)
+  - [:whale: nerdctl inspect](#whale-nerdctl-inspect)
   - [:whale: nerdctl logs](#whale-nerdctl-logs)
   - [:whale: nerdctl port](#whale-nerdctl-port)
   - [:whale: nerdctl rm](#whale-nerdctl-rm)
@@ -34,15 +34,17 @@ It does not necessarily mean that the corresponding features are missing in cont
   - [:whale: nerdctl attach](#whale-nerdctl-attach)
   - [:whale: nerdctl container prune](#whale-nerdctl-container-prune)
   - [:whale: nerdctl diff](#whale-nerdctl-diff)
+  - [:whale: nerdctl export](#whale-nerdctl-export)
 - [Build](#build)
   - [:whale: nerdctl build](#whale-nerdctl-build)
   - [:whale: nerdctl commit](#whale-nerdctl-commit)
 - [Image management](#image-management)
-  - [:whale: :blue_square: nerdctl images](#whale-blue_square-nerdctl-images)
-  - [:whale: :blue_square: nerdctl pull](#whale-blue_square-nerdctl-pull)
+  - [:whale: nerdctl images](#whale-nerdctl-images)
+  - [:whale: nerdctl pull](#whale-nerdctl-pull)
   - [:whale: nerdctl push](#whale-nerdctl-push)
   - [:whale: nerdctl load](#whale-nerdctl-load)
   - [:whale: nerdctl save](#whale-nerdctl-save)
+  - [:whale: nerdctl import](#whale-nerdctl-import)
   - [:whale: nerdctl tag](#whale-nerdctl-tag)
   - [:whale: nerdctl rmi](#whale-nerdctl-rmi)
   - [:whale: nerdctl image inspect](#whale-nerdctl-image-inspect)
@@ -51,9 +53,20 @@ It does not necessarily mean that the corresponding features are missing in cont
   - [:nerd_face: nerdctl image convert](#nerd_face-nerdctl-image-convert)
   - [:nerd_face: nerdctl image encrypt](#nerd_face-nerdctl-image-encrypt)
   - [:nerd_face: nerdctl image decrypt](#nerd_face-nerdctl-image-decrypt)
+- [Checkpoint management](#checkpoint-management)
+  - [:whale: nerdctl checkpoint create](#whale-nerdctl-checkpoint-create)
+  - [:whale: nerdctl checkpoint list](#whale-nerdctl-checkpoint-list)
+  - [:whale: nerdctl checkpoint remove](#whale-nerdctl-checkpoint-remove)
+- [Manifest management](#manifest-management)
+  - [:whale: nerdctl manifest annotate](#whale-nerdctl-manifest-annotate)
+  - [:whale: nerdctl manifest create](#whale-nerdctl-manifest-create)
+  - [:whale: nerdctl manifest inspect](#whale-nerdctl-manifest-inspect)
+  - [:whale: nerdctl manifest push](#whale-nerdctl-manifest-push)
+  - [:whale: nerdctl manifest rm](#whale-nerdctl-manifest-rm)
 - [Registry](#registry)
   - [:whale: nerdctl login](#whale-nerdctl-login)
   - [:whale: nerdctl logout](#whale-nerdctl-logout)
+  - [:whale: nerdctl search](#whale-nerdctl-search)
 - [Network management](#network-management)
   - [:whale: nerdctl network create](#whale-nerdctl-network-create)
   - [:whale: nerdctl network ls](#whale-nerdctl-network-ls)
@@ -67,11 +80,11 @@ It does not necessarily mean that the corresponding features are missing in cont
   - [:whale: nerdctl volume rm](#whale-nerdctl-volume-rm)
   - [:whale: nerdctl volume prune](#whale-nerdctl-volume-prune)
 - [Namespace management](#namespace-management)
-  - [:nerd_face: :blue_square: nerdctl namespace create](#nerd_face-blue_square-nerdctl-namespace-create)
-  - [:nerd_face: :blue_square: nerdctl namespace inspect](#nerd_face-blue_square-nerdctl-namespace-inspect)
-  - [:nerd_face: :blue_square: nerdctl namespace ls](#nerd_face-blue_square-nerdctl-namespace-ls)
-  - [:nerd_face: :blue_square: nerdctl namespace remove](#nerd_face-blue_square-nerdctl-namespace-remove)
-  - [:nerd_face: :blue_square: nerdctl namespace update](#nerd_face-blue_square-nerdctl-namespace-update)
+  - [:nerd_face: nerdctl namespace create](#nerd_face-nerdctl-namespace-create)
+  - [:nerd_face: nerdctl namespace inspect](#nerd_face-nerdctl-namespace-inspect)
+  - [:nerd_face: nerdctl namespace ls](#nerd_face-nerdctl-namespace-ls)
+  - [:nerd_face: nerdctl namespace remove](#nerd_face-nerdctl-namespace-remove)
+  - [:nerd_face: nerdctl namespace update](#nerd_face-nerdctl-namespace-update)
 - [AppArmor profile management](#apparmor-profile-management)
   - [:nerd_face: nerdctl apparmor inspect](#nerd_face-nerdctl-apparmor-inspect)
   - [:nerd_face: nerdctl apparmor load](#nerd_face-nerdctl-apparmor-load)
@@ -84,6 +97,7 @@ It does not necessarily mean that the corresponding features are missing in cont
   - [:whale: nerdctl events](#whale-nerdctl-events)
   - [:whale: nerdctl info](#whale-nerdctl-info)
   - [:whale: nerdctl version](#whale-nerdctl-version)
+  - [:whale: nerdctl system df](#whale-nerdctl-system-df)
   - [:whale: nerdctl system prune](#whale-nerdctl-system-prune)
 - [Stats](#stats)
   - [:whale: nerdctl stats](#whale-nerdctl-stats)
@@ -127,7 +141,7 @@ It does not necessarily mean that the corresponding features are missing in cont
 
 ## Container management
 
-### :whale: :blue_square: nerdctl run
+### :whale: nerdctl run
 
 Run a command in a new container.
 
@@ -139,11 +153,11 @@ Usage: `nerdctl run [OPTIONS] IMAGE [COMMAND] [ARG...]`
 Basic flags:
 
 - :whale: `-a, --attach`: Attach STDIN, STDOUT, or STDERR
-- :whale: :blue_square: `-i, --interactive`: Keep STDIN open even if not attached"
-- :whale: :blue_square: `-t, --tty`: Allocate a pseudo-TTY
+- :whale: `-i, --interactive`: Keep STDIN open even if not attached
+- :whale: `-t, --tty`: Allocate a pseudo-TTY
   - :warning: WIP: currently `-t` conflicts with `-d`
-- :whale: `-sig-proxy`: Proxy received signals to the process (default true)
-- :whale: :blue_square: `-d, --detach`: Run container in background and print container ID
+- :whale: `--sig-proxy`: Proxy received signals to the process (default true)
+- :whale: `-d, --detach`: Run container in background and print container ID
 - :whale: `--restart=(no|always|on-failure|unless-stopped)`: Restart policy to apply when a container exits
   - Default: "no"
   - always: Always restart the container if it stops.
@@ -172,7 +186,7 @@ Init process flags:
 
 Isolation flags:
 
-- :whale: :blue_square: :nerd_face: `--isolation=(default|process|host|hyperv)`: Used on Windows to change process isolation level. `default` will use the runtime options configured in `default_runtime` in the [containerd configuration](https://github.com/containerd/containerd/blob/master/docs/cri/config.md#cri-plugin-config-guide) which is `process` in containerd by default. `process` runs process isolated containers.  `host` runs [Host Process containers](https://kubernetes.io/docs/tasks/configure-pod-container/create-hostprocess-pod/).  Host process containers inherit permissions from containerd process unless `--user` is specified then will start with user specified and the user specified must be present on the host.  `host` requires Containerd 1.7+. `hyperv` runs Hyper-V hypervisor partition-based isolated containers. Not implemented for Linux.
+- :whale: :nerd_face: `--isolation=(default|process|host|hyperv)`: Used on Windows to change process isolation level. `default` will use the runtime options configured in `default_runtime` in the [containerd configuration](https://github.com/containerd/containerd/blob/master/docs/cri/config.md#cri-plugin-config-guide) which is `process` in containerd by default. `process` runs process isolated containers.  `host` runs [Host Process containers](https://kubernetes.io/docs/tasks/configure-pod-container/create-hostprocess-pod/).  Host process containers inherit permissions from containerd process unless `--user` is specified then will start with user specified and the user specified must be present on the host.  `host` requires Containerd 1.7+. `hyperv` runs Hyper-V hypervisor partition-based isolated containers. Not implemented for Linux.
 
 Network flags:
 
@@ -223,15 +237,15 @@ Resource flags:
 - :whale: `--cgroupns=(host|private)`: Cgroup namespace to use
   - Default: "private" on cgroup v2 hosts, "host" on cgroup v1 hosts
 - :whale: `--cgroup-parent`: Optional parent cgroup for the container
-- :whale: :blue_square: `--device`: Add a host device to the container
+- :whale: `--device`: Add a host device to the container
 
 Intel RDT flags:
 
-- :nerd_face: `--rdt-class=CLASS`: Name of the RDT class (or CLOS) to associate the container wit
+- :nerd_face: `--rdt-class=CLASS`: Name of the RDT class (or CLOS) to associate the container with
 
 User flags:
 
-- :whale: :blue_square: `-u, --user`: Username or UID (format: <name|uid>[:<group|gid>])
+- :whale: `-u, --user`: Username or UID (format: <name|uid>[:<group|gid>])
 - :nerd_face: `--umask`: Set the umask inside the container. Defaults to 0022.
   Corresponds to Podman CLI.
 - :whale: `--group-add`: Add additional groups to join
@@ -242,8 +256,10 @@ Security flags:
 
 - :whale: `--security-opt seccomp=<PROFILE_JSON_FILE>`: specify custom seccomp profile
 - :whale: `--security-opt apparmor=<PROFILE>`: specify custom AppArmor profile
+- :whale: `--security-opt label=<selinuxlabel>`: specify custom selinux label
 - :whale: `--security-opt no-new-privileges`: disallow privilege escalation, e.g., setuid and file capabilities
 - :whale: `--security-opt systempaths=unconfined`: Turn off confinement for system paths (masked paths, read-only paths) for the container
+- :whale: `--security-opt writable-cgroups`: making the cgroups writeable
 - :nerd_face: `--security-opt privileged-without-host-devices`: Don't pass host devices to privileged containers
 - :whale: `--cap-add=<CAP>`: Add Linux capabilities
 - :whale: `--cap-drop=<CAP>`: Drop Linux capabilities
@@ -265,37 +281,59 @@ Runtime flags:
 
 Volume flags:
 
-- :whale: :blue_square: `-v, --volume <SRC>:<DST>[:<OPT>]`: Bind mount a volume, e.g., `-v /mnt:/mnt:rro,rprivate`
+- :whale: `-v, --volume <SRC>:<DST>[:<OPT>]`: Bind mount a volume, e.g., `-v /mnt:/mnt:ro`
   - :whale:     option `rw` : Read/Write (when writable)
-  - :whale:     option `ro` : Non-recursive read-only
-  - :nerd_face: option `rro`: Recursive read-only. Should be used in conjunction with `rprivate`. e.g., `-v /mnt:/mnt:rro,rprivate` makes children such as `/mnt/usb` to be read-only, too.
-    Requires kernel >= 5.12, and crun >= 1.4 or runc >= 1.1 (PR [#3272](https://github.com/opencontainers/runc/pull/3272)). With older runc, `rro` just works as `ro`.
+  - :whale:     option `ro` : Read-only. Recursively read-only (e.g., making children such as `/mnt/usb` read-only, too) when the kernel and the OCI runtime support it
+    (kernel >= 5.12, and runc >= 1.1 or crun >= 1.8.6, as in Docker v25), otherwise non-recursive read-only.
+    Use `--mount type=bind,...,readonly,bind-recursive=<writable|readonly>` to control the recursive read-only mode explicitly.
+  - :nerd_face: option `rro`: **Deprecated** since the same feature was introduced in Docker v25 with a different syntax; use `--mount type=bind,...,readonly,bind-propagation=rprivate,bind-recursive=readonly` instead.
+    Recursive read-only. Should be used in conjunction with `rprivate`. e.g., `-v /mnt:/mnt:rro,rprivate` makes children such as `/mnt/usb` to be read-only, too.
+    Requires kernel >= 5.12, and runc >= 1.1 or crun >= 1.8.6; an error is raised when the recursive read-only mount is not supported.
   - :whale:     option `shared`, `slave`, `private`: Non-recursive "shared" / "slave" / "private" propagation
   - :whale:     option `rshared`, `rslave`, `rprivate`: Recursive "shared" / "slave" / "private" propagation
   - :nerd_face: option `bind`: Not-recursively bind-mounted
   - :nerd_face: option `rbind`: Recursively bind-mounted
+  - :whale:     option `z`: SELinux shared (multi-category) relabel of the volume content so it can be shared among containers
+  - :whale:     option `Z`: SELinux private unshared relabel of the volume content for this container only
+    - Requires SELinux on the host and nerdctl started with `--selinux-enabled` (or `selinux_enabled = true` in `nerdctl.toml`).
+    - Example: `nerdctl run --rm -v /var/data:/data:Z --selinux-enabled IMAGE`
 - :whale: `--tmpfs`: Mount a tmpfs directory, e.g. `--tmpfs /tmp:size=64m,exec`.
 - :whale: `--mount`: Attach a filesystem mount to the container.
   Consists of multiple key-value pairs, separated by commas and each
   consisting of a `<key>=<value>` tuple.
   e.g., `-- mount type=bind,source=/src,target=/app,bind-propagation=shared`.
-  - :whale: `type`: Current supported mount types are `bind`, `volume`, `tmpfs`.
+  - :whale: `type`: Current supported mount types are `bind`, `volume`, `tmpfs`, `image`.
     The default type will be set to `volume` if not specified.
     i.e., `--mount src=vol-1,dst=/app,readonly` equals `--mount type=volume,src=vol-1,dst=/app,readonly`
   - Common Options:
     - :whale: `src`, `source`: Mount source spec for bind and volume. Mandatory for bind.
     - :whale: `dst`, `destination`, `target`: Mount destination spec.
-    - :whale: `readonly`, `ro`, `rw`, `rro`: Filesystem permissions.
+    - :whale: `readonly`, `ro`: mount the filesystem read-only. Recursively read-only when the kernel and the OCI runtime support it
+      (kernel >= 5.12, and runc >= 1.1 or crun >= 1.8.6, as in Docker v25). See the `bind-recursive` option below to control the recursive read-only mode explicitly.
+    - :nerd_face: `rro`: **Deprecated** since the same feature was introduced in Docker v25 with a different syntax; use `readonly` with `bind-propagation=rprivate` and `bind-recursive=readonly` instead.
+      Mount the filesystem recursively read-only.
   - Options specific to `bind`:
     - :whale: `bind-propagation`: `shared`, `slave`, `private`, `rshared`, `rslave`, or `rprivate`(default).
-    - :whale: `bind-nonrecursive`: `true` or `false`(default). If set to true, submounts are not recursively bind-mounted. This option is useful for readonly bind mount.
+    - :whale: `bind-recursive`: `enabled`(default), `disabled`, `writable`, or `readonly`.
+      - `enabled`: submounts are recursively bind-mounted, and a `readonly` mount is recursively read-only when the kernel and the OCI runtime support it.
+      - `disabled`: submounts are not recursively bind-mounted.
+      - `writable`: submounts of a `readonly` mount are kept writable (the default behavior of Docker until v24).
+      - `readonly`: a `readonly` mount is forced to be recursively read-only; an error is raised when the kernel or the OCI runtime does not support it.
+         Requires `bind-propagation=rprivate` to be specified in conjunction.
+      Whether the OCI runtime supports recursive read-only mounts is detected by running `$RUNTIME features`, and the result is cached in the XDG cache directory (e.g., `~/.cache/nerdctl/oci-runtime-features`).
+    - :whale: `bind-nonrecursive`: `true` or `false`(default). Deprecated alias for `bind-recursive=disabled` / `bind-recursive=enabled` (removed in Docker v29). If set to true, submounts are not recursively bind-mounted.
     - unimplemented options: `consistency`
   - Options specific to `tmpfs`:
     - :whale: `tmpfs-size`: Size of the tmpfs mount in bytes. Unlimited by default.
     - :whale: `tmpfs-mode`: File mode of the tmpfs in **octal**.
       Defaults to `1777` or world-writable.
   - Options specific to `volume`:
-    - unimplemented options: `volume-nocopy`, `volume-label`, `volume-driver`, `volume-opt`
+    - :whale: `volume-nocopy`: Do not copy existing data from the container into the volume.
+    - unimplemented options: `volume-label`, `volume-driver`, `volume-opt`
+  - Options specific to `image`:
+    - :whale: `src`, `source`: image reference (mandatory).
+    - :whale: Currently, the image filesystem is mounted read-only.
+    - :whale: `image-subpath`: relative path inside the image rootfs to mount instead of the whole rootfs. The value is normalized (`a/../b` means `b`) and must resolve inside the rootfs: an empty value, an absolute path, a path escaping the rootfs, and a path through an absolute symlink (such as Alpine's `/bin/sh`) are rejected. A value that normalizes to the rootfs itself, such as `.`, mounts the whole rootfs.
 - :whale: `--volumes-from`: Mount volumes from the specified container(s), e.g. "--volumes-from my-container".
 
 Rootfs flags:
@@ -306,19 +344,28 @@ Rootfs flags:
 
 Env flags:
 
-- :whale: :blue_square: `--entrypoint`: Overwrite the default ENTRYPOINT of the image
-- :whale: :blue_square: `-w, --workdir`: Working directory inside the container
-- :whale: :blue_square: `-e, --env`: Set environment variables
-- :whale: :blue_square: `--env-file`: Set environment variables from file
+- :whale: `--entrypoint`: Overwrite the default ENTRYPOINT of the image
+- :whale: `-w, --workdir`: Working directory inside the container
+- :whale: `-e, --env`: Set environment variables
+- :whale: `--env-file`: Set environment variables from file
 
 Metadata flags:
 
-- :whale: :blue_square: `--name`: Assign a name to the container
-- :whale: :blue_square: `-l, --label`: Set meta data on a container (Not passed through the OCI runtime since nerdctl v2.0, with an exception for `nerdctl/bypass4netns`)
-- :whale: :blue_square: `--label-file`: Read in a line delimited file of labels
-- :whale: :blue_square: `--annotation`: Add an annotation to the container (passed through to the OCI runtime)
-- :whale: :blue_square: `--cidfile`: Write the container ID to the file
+- :whale: `--name`: Assign a name to the container
+- :whale: `-l, --label`: Set meta data on a container (Not passed through the OCI runtime since nerdctl v2.0, with an exception for `nerdctl/bypass4netns`)
+- :whale: `--label-file`: Read in a line delimited file of labels
+- :whale: `--annotation`: Add an annotation to the container (passed through to the OCI runtime)
+- :whale: `--cidfile`: Write the container ID to the file
 - :nerd_face: `--pidfile`: file path to write the task's pid. The CLI syntax conforms to Podman convention.
+
+Health check flags:
+
+- :whale: `--health-cmd`: Command to run to check container health
+- :whale: `--health-interval`: Time between running the check (e.g., 30s, 1m)
+- :whale: `--health-timeout`: Time to wait before considering the check failed (e.g., 5s)
+- :whale: `--health-retries`: Number of failures before container is considered unhealthy
+- :whale: `--health-start-period`: Start period for the container to initialize before starting health-retries countdown
+- :whale: `--no-healthcheck`: Disable any health checks defined by image or CLI
 
 Logging flags:
 
@@ -340,7 +387,7 @@ Logging flags:
     - The `fluentd` logging driver supports the following logging options:
       - :whale: `--log-opt=fluentd-address=<ADDRESS>`: The address of the `fluentd` daemon, tcp(default) and unix sockets are supported..
       - :whale: `--log-opt=fluentd-async=<true|false>`: Enable async mode for fluentd. The default value is false.
-      - :whale: `--log-opt=fluentd-buffer-limit=<LIMIT>`: The buffer limit for fluentd. If the buffer is full, the call to record logs will fail. The default is 8192. (<https://github.com/fluent/fluent-logger-golang/tree/master#bufferlimit>)
+      - :whale: `--log-opt=fluentd-buffer-limit=<LIMIT>`: The buffer limit for fluentd. If the buffer is full, the call to record logs will fail. The default is 1MiB. Accepts human-readable sizes (e.g., `1KiB`, `1MiB`, `1GiB`) or raw byte values. (<https://github.com/fluent/fluent-logger-golang/tree/master#bufferlimit>)
       - :whale: `--log-opt=fluentd-retry-wait=<1s|1ms>`: The time to wait before retrying to send logs to fluentd. The default value is 1s.
       - :whale: `--log-opt=fluentd-max-retries=<1>`: The maximum number of retries to send logs to fluentd. The default value is MaxInt32.
       - :whale: `--log-opt=fluentd-sub-second-precision=<true|false>`: Enable sub-second precision for fluentd. The default value is false.
@@ -427,10 +474,11 @@ IPFS flags:
 - :nerd_face: `--ipfs-address`: Multiaddr of IPFS API (default uses `$IPFS_PATH` env variable if defined or local directory `~/.ipfs`)
 
 Unimplemented `docker run` flags:
-    `--device-cgroup-rule`, `--disable-content-trust`, `--expose`, `--health-*`, `--isolation`, `--no-healthcheck`,
-    `--link*`, `--publish-all`, `--storage-opt`, `--volume-driver`
+    `--device-cgroup-rule`, `--disable-content-trust`,
+    `--health-start-interval`, `--link*`, `--storage-opt`,
+    `--volume-driver`
 
-### :whale: :blue_square: nerdctl exec
+### :whale: nerdctl exec
 
 Run a command in a running container.
 
@@ -450,7 +498,7 @@ Flags:
 
 Unimplemented `docker exec` flags: `--detach-keys`
 
-### :whale: :blue_square: nerdctl create
+### :whale: nerdctl create
 
 Create a new container.
 
@@ -470,6 +518,8 @@ Usage:
 - `nerdctl cp [OPTIONS] CONTAINER:SRC_PATH DEST_PATH|-`
 - `nerdctl cp [OPTIONS] SRC_PATH|- CONTAINER:DEST_PATH`
 
+Using `-` as the `SRC_PATH` streams the contents of `STDIN` as a tar archive. The command extracts the content of the tar to the `DEST_PATH` in container's filesystem. In this case, `DEST_PATH` must specify a directory. Using `-` as the `DEST_PATH` streams the contents of the resource as a tar archive to `STDOUT`.
+
 :warning: `nerdctl cp` is designed only for use with trusted, cooperating containers.
 Using `nerdctl cp` with untrusted or malicious containers is unsupported and may not provide protection against unexpected behavior.
 
@@ -479,7 +529,7 @@ Flags:
 
 Unimplemented `docker cp` flags: `--archive`
 
-### :whale: :blue_square: nerdctl ps
+### :whale: nerdctl ps
 
 List containers.
 
@@ -523,7 +573,7 @@ Following arguments for `--filter` are not supported yet:
 4. `--filter isolation=<value>`
 5. `--filter is-task=<value>`
 
-### :whale: :blue_square: nerdctl inspect
+### :whale: nerdctl inspect
 
 Display detailed information on one or more containers.
 
@@ -535,8 +585,6 @@ Flags:
 - :whale: `--format`: Format the output using the given Go template, e.g, `{{json .}}`
 - :whale: `--type`: Return JSON for specified type
 - :whale: `--size`: Display total file sizes if the type is container
-
-Unimplemented `docker inspect` flags:  `--size`
 
 ### :whale: nerdctl logs
 
@@ -596,8 +644,8 @@ Flags:
 
 - :whale: `-a, --attach`: Attach STDOUT/STDERR and forward signals
 - :whale: `--detach-keys`: Override the default detach keys
-
-Unimplemented `docker start` flags: `--checkpoint`, `--checkpoint-dir`, `--interactive`
+- :whale: `--checkpoint`: checkpoint name
+- :whale: `--detach-keys`: checkpoint directory
 
 ### :whale: nerdctl restart
 
@@ -686,8 +734,9 @@ Usage: `nerdctl attach CONTAINER`
 Flags:
 
 - :whale: `--detach-keys`: Override the default detach keys
+- :whale: `--no-stdin`: Do not attach STDIN
 
-Unimplemented `docker attach` flags: `--no-stdin`, `--sig-proxy`
+Unimplemented `docker attach` flags: `--sig-proxy`
 
 ### :whale: nerdctl container prune
 
@@ -706,6 +755,12 @@ Unimplemented `docker container prune` flags: `--filter`
 Inspect changes to files or directories on a container's filesystem
 
 Usage: `nerdctl diff CONTAINER`
+
+### :whale: nerdctl export
+
+Export a containers filesystem as a tar archive.
+
+Usage: `nerdctl export CONTAINER`
 
 ## Build
 
@@ -749,6 +804,8 @@ Flags:
 - :whale: `--network=(default|host|none)`: Set the networking mode for the RUN instructions during build.(compatible with `buildctl build`)
 - :whale: `--build-context`: Set additional contexts for build (e.g. dir2=/path/to/dir2, myorg/myapp=docker-image://path/to/myorg/myapp)
 - :whale: `--add-host`: Add a custom host-to-IP mapping (format: `host:ip`)
+- :nerd_face: `--source-policy-file`: BuildKit source policy JSON file for reproducible builds. See [BuildKit build-repro docs](https://github.com/moby/buildkit/blob/master/docs/build-repro.md).
+  For compatibility with Docker Buildx, the `EXPERIMENTAL_BUILDKIT_SOURCE_POLICY` environment variable is also supported. Example no-op policy: `{"rules":[]}`
 
 Unimplemented `docker build` flags: `--squash`
 
@@ -764,14 +821,44 @@ Flags:
 - :whale: `-m, --message`: Commit message
 - :whale: `-c, --change`: Apply Dockerfile instruction to the created image (supported directives: [CMD, ENTRYPOINT])
 - :whale: `-p, --pause`: Pause container during commit (default: true)
+- :nerd_face: `--timeout`: Maximum duration for the commit operation (default: 1h). Set to `0` (or `0s`) to use containerd's default lease expiration (24h). Accepts Go duration format (e.g., `2h`, `90m`).
+- :nerd_face: `--compression`: Commit compression algorithm (supported values: zstd or gzip) (default: gzip) (zstd is generally better for compression ratio but might not be as widely supported)
+- :nerd_face: `--format`: Format of the committed image (supported values: docker or oci) (default: docker) (docker uses Docker Schema2 media types for compatibility, oci uses OCI image format media types)
+- :nerd_face: `--estargz`: Convert the committed layer to eStargz for lazy pulling
+- :nerd_face: `--estargz-compression-level`: eStargz compression level (1-9) (default: 9)
+- :nerd_face: `--estargz-chunk-size`: eStargz chunk size
+- :nerd_face: `--estargz-min-chunk-size`: The minimal number of bytes of data must be written in one gzip stream
+- :nerd_face: `--zstdchunked`: Convert the committed layer to zstd:chunked for lazy pulling
+support zstdchunked convert
+- :nerd_face: `--zstdchunked-compression-level`: zstd:chunked compression level (default: 3)
+- :nerd_face: `--zstdchunked-chunk-size`: zstd:chunked chunk size
 
 ## Image management
 
-### :whale: :blue_square: nerdctl images
+### :whale: nerdctl images
 
 List images
 
-:warning: The image ID is usually different from Docker image ID.
+:warning: The image ID is the OCI digest of the image target (index/manifest). It matches Docker's ID with the containerd image store, but differs from the legacy graphdriver image ID (config digest).
+
+By default (Docker v29 compatible view) the columns are `IMAGE`, `ID`, `DISK USAGE`,
+`CONTENT SIZE` and `EXTRA` (where `U` means the image is in use by a container).
+Passing `--format`, `--quiet`, `--no-trunc`, `--digests` or `--names` falls back to the
+legacy table (`REPOSITORY`, `TAG`, `IMAGE ID`, `CREATED`, `PLATFORM`, `SIZE`, `BLOB SIZE`).
+
+`--tree` keeps the same columns and adds a row per platform the image declares:
+
+```console
+$ nerdctl images --tree
+IMAGE             ID              DISK USAGE    CONTENT SIZE    EXTRA
+nginx:latest      7f553e8bbc89    211MB         67.4MB          U
+├─ linux/amd64    d9153e78d05e    72.4MB        25.2MB          U
+├─ linux/arm64    1a2b3c4d5e6f    70.1MB        24.9MB
+└─ linux/s390x    2b3c4d5e6f7a    0B            0B
+```
+
+The `U` flag on a platform row means a container runs that specific platform. Platforms that were
+never pulled are listed with zero sizes, like `docker image ls --tree` does.
 
 Usage: `nerdctl images [OPTIONS] [REPOSITORY[:TAG]]`
 
@@ -781,7 +868,7 @@ Flags:
 - :whale: `-q, --quiet`: Only show numeric IDs
 - :whale: `--no-trunc`: Don't truncate output
 - :whale: `--format`: Format the output using the given Go template
-  - :whale: `--format=table` (default): Table
+  - :whale: `--format=table`: Legacy table (default is the Docker v29 compatible view)
   - :whale: `--format='{{json .}}'`: JSON
   - :nerd_face: `--format=wide`: Wide table
   - :nerd_face: `--format=json`: Alias of `--format='{{json .}}'`
@@ -793,8 +880,9 @@ Flags:
   - :whale: `--filter=dangling=true`: Filter images by dangling
   - :nerd_face: `--filter=reference=<image:tag>`: Filter images by reference (Matches both docker compatible wildcard pattern and regexp match)
 - :nerd_face: `--names`: Show image names
+- :whale: `--tree`: List multi-platform images as a tree (EXPERIMENTAL). Cannot be combined with `--quiet`, `--no-trunc`, `--digests`, `--format` or `--names`.
 
-### :whale: :blue_square: nerdctl pull
+### :whale: nerdctl pull
 
 Pull an image from a registry.
 
@@ -832,6 +920,7 @@ Flags:
 
 - :nerd_face: `--platform=(amd64|arm64|...)`: Push content for a specific platform
 - :nerd_face: `--all-platforms`: Push content for all platforms
+- :whale: `-a, --all-tags`: Push all tags of an image to the repository. `NAME` must not contain a tag.
 - :nerd_face: `--sign`: Sign the image (none|cosign|notation). See [`./cosign.md`](./cosign.md) and [`./notation.md`](./notation.md) for details.
 - :nerd_face: `--cosign-key`: Path to the private key file, KMS, URI or Kubernetes Secret for `--sign=cosign`
 - :nerd_face: `--notation-key-name`: Signing key name for a key previously added to notation's key list for `--sign=notation`
@@ -841,7 +930,7 @@ Flags:
 - :nerd_face: `--soci-span-size`: Span size in bytes that soci index uses to segment layer data. Default is 4 MiB.
 - :nerd_face: `--soci-min-layer-size`: Minimum layer size in bytes to build zTOC for. Smaller layers won't have zTOC and not lazy pulled. Default is 10 MiB.
 
-Unimplemented `docker push` flags: `--all-tags`, `--disable-content-trust` (default true)
+Unimplemented `docker push` flags: `--disable-content-trust` (default true)
 
 ### :whale: nerdctl load
 
@@ -869,8 +958,22 @@ Usage: `nerdctl save [OPTIONS] IMAGE [IMAGE...]`
 Flags:
 
 - :whale: `-o, --output`: Write to a file, instead of STDOUT
+- :nerd_face: `-q, --quiet`: Suppress the progress output
 - :nerd_face: `--platform=(amd64|arm64|...)`: Export content for a specific platform
 - :nerd_face: `--all-platforms`: Export content for all platforms
+
+### :whale: nerdctl import
+
+Import the contents from a tarball to create a filesystem image.
+
+Usage: `nerdctl import [OPTIONS] file|URL|- [REPOSITORY[:TAG]]`
+
+Flags:
+
+- :whale: `-m, --message`: Set commit message for imported image
+- :nerd_face: `--platform=(linux/amd64|linux/arm64|...)`: Set platform for the imported image
+
+Unimplemented `docker import` flags: `--change`
 
 ### :whale: nerdctl tag
 
@@ -925,7 +1028,7 @@ Usage: `nerdctl image prune [OPTIONS]`
 Flags:
 
 - :whale: `-a, --all`: Remove all unused images, not just dangling ones
-- :whale: `-f, --filter`: Filter the images.
+- :whale: `--filter`: Filter the images.
   - :whale: `--filter=until=<timestamp>`: Images created before given date formatted timestamps or Go duration strings. Currently does not support Unix timestamps.
   - :whale: `--filter=label<key>=<value>`: Matches images based on the presence of a label alone or a label and a value
 - :whale: `-f, --force`: Do not prompt for confirmation
@@ -953,10 +1056,21 @@ Flags:
 - `--zstdchunked-record-in=<FILE>` : read `ctr-remote optimize --record-out=<FILE>` record file. :warning: This flag is experimental and subject to change.
 - `--zstdchunked-compression-level=<LEVEL>`: zstd:chunked compression level (default: 3)
 - `--zstdchunked-chunk-size=<SIZE>`: zstd:chunked chunk size
+- `--overlaybd`                        : convert tar.gz layers to overlaybd layers. Should be used in conjunction with '--oci'
+- `--overlaybd-fs-type=<TYPE>`         : filesystem type for overlaybd (default: `ext4`)
+- `--overlaybd-dbstr=<STRING>`         : database config string for overlaybd
+- `--overlaybd-vsize=<SIZE>`           : virtual block device size in GB for overlaybd (default: 64)
+- `--erofs=<MODE>`                    : convert image layers to EROFS media type. Supported values: `raw`, `zstd` (see [`./erofs.md`](./erofs.md))
+- `--erofs-compressors=<COMPRESSORS>` : specify mkfs.erofs compressor options, e.g. `lz4hc,12`
+- `--erofs-mkfs-options=<OPTIONS>`    : specify extra mkfs.erofs options, e.g. `-T0 --mkfs-time`
 - `--uncompress`                       : convert tar.gz layers to uncompressed tar layers
 - `--oci`                              : convert Docker media types to OCI media types
 - `--platform=<PLATFORM>`              : convert content for a specific platform
 - `--all-platforms`                    : convert content for all platforms (default: false)
+- `--soci`                             : convert content to SOCI image manifest v2
+*[**Note**: soci convert uses the default platform if nothing is specified. --platform flag can be used to specify a platform]*
+- `--soci-span-size` : Span size in bytes that soci index uses to segment layer data. Default is 4 MiB.
+- `--soci-min-layer-size`: Minimum layer size in bytes to build zTOC for. Smaller layers won't have zTOC and not lazy pulled. Default is 10 MiB.
 
 ### :nerd_face: nerdctl image encrypt
 
@@ -1008,6 +1122,129 @@ Flags:
 - `--platform=<PLATFORM>`        : Convert content for a specific platform
 - `--all-platforms`              : Convert content for all platforms (default: false)
 
+## Checkpoint management
+
+### :whale: nerdctl checkpoint create
+
+Create a checkpoint from a running container.
+
+Usage: `nerdctl checkpoint create [OPTIONS] CONTAINER CHECKPOINT`
+
+Flags:
+- :whale: `--leave-running`: Leave the container running after checkpoint
+- :whale: `checkpoint-dir`: Use a custom checkpoint storage directory
+
+### :whale: nerdctl checkpoint list
+
+List checkpoints for a container
+
+Usage: `nerdctl checkpoint list/ls [OPTIONS] CONTAINER`
+
+Flags:
+- :whale: `checkpoint-dir`: Use a custom checkpoint storage directory
+
+### :whale: nerdctl checkpoint remove
+
+Remove a checkpoint for a container
+
+Usage: `nerdctl checkpoint remove/rm [OPTIONS] CONTAINER CHECKPOINT`
+
+Flags:
+- :whale: `checkpoint-dir`: Use a custom checkpoint storage directory
+
+## Manifest management
+
+### :whale: nerdctl manifest annotate
+
+Add additional information to a local image manifest.
+
+Usage: `nerdctl manifest annotate [OPTIONS] INDEX/MANIFESTLIST MANIFEST`
+
+Flags:
+
+- :whale: `--os`: Set operating system (e.g., "linux", "windows", "freebsd")
+- :whale: `--arch`: Set architecture (e.g., "amd64", "arm64", "arm")
+- :whale: `--os-version`: Set operating system version (e.g., "10.0.19041")
+- :whale: `--variant`: Set architecture variant (e.g., "v7", "v8")
+- :whale: `--os-features`: Set operating system features (e.g., "win32k")
+
+Examples:
+
+```bash
+nerdctl manifest annotate myapp:latest alpine@sha256:eafc1edb577d2e9b458664a15f23ea1c370214193226069eb22921169fc7e43f \
+  --os linux --arch arm --variant v7 --os-features feature1,feature2
+```
+
+### :whale: nerdctl manifest create
+
+Create a local index/manifest list.
+
+Usage: `nerdctl manifest create [OPTIONS] INDEX/MANIFESTLIST MANIFEST [MANIFEST...]`
+
+Flags:
+
+- `--amend`: Amend the existing index/manifest list
+- `--insecure`: Allow communication with an insecure registry
+
+Example:
+
+```bash
+nerdctl manifest create myapp:latest alpine@sha256:eafc1edb577d2e9b458664a15f23ea1c370214193226069eb22921169fc7e43f
+```
+
+### :whale: nerdctl manifest inspect
+
+Display the contents of a manifest list or manifest.
+
+Usage: `nerdctl manifest inspect [OPTIONS] MANIFEST`
+
+#### Input formats
+
+You can specify the manifest to inspect using one of the following formats:
+- **Image name with tag**: `alpine:3.22.1`
+- **Image name with digest**: `alpine@sha256:eafc1edb577d2e9b458664a15f23ea1c370214193226069eb22921169fc7e43f`
+
+Flags:
+
+- `--verbose` : Verbose output, show additional info including layers and platform
+- `--insecure`: Allow communication with an insecure registry
+Example:
+
+```bash
+nerdctl manifest inspect alpine:3.22.1
+nerdctl manifest inspect alpine@sha256:eafc1edb577d2e9b458664a15f23ea1c370214193226069eb22921169fc7e43f
+```
+
+### :whale: nerdctl manifest push
+
+Push a manifest list to a registry.
+
+Usage: `nerdctl manifest push [OPTIONS] INDEX/MANIFESTLIST`
+
+Flags:
+
+- `--insecure`: Allow communication with an insecure registry
+- `--purge`: Remove the manifest list after pushing
+
+Examples:
+
+```bash
+# Push a manifest list to a registry
+nerdctl manifest push myapp:latest
+```
+
+### :whale: nerdctl manifest rm
+
+Remove one or more index/manifest lists.
+
+Usage: `nerdctl manifest rm INDEX/MANIFESTLIST [INDEX/MANIFESTLIST...]`
+
+Example:
+
+```bash
+nerdctl manifest rm alpine:3.22.1 alpine:3.22.2
+```
+
 ## Registry
 
 ### :whale: nerdctl login
@@ -1028,6 +1265,19 @@ Log out from a container registry
 
 Usage: `nerdctl logout [SERVER]`
 
+### :whale: nerdctl search
+
+Search Docker Hub or a registry for images
+
+Usage: `nerdctl search [OPTIONS] TERM`
+
+Flags:
+
+- :whale: `--limit`: Max number of search results (default: 0)
+- :whale: `--no-trunc`: Don't truncate output (default: false)
+- :whale: `--filter, -f`: Filter output based on conditions provided
+- :whale: `--format`: Format the output using the given Go template
+
 ## Network management
 
 ### :whale: nerdctl network create
@@ -1044,26 +1294,31 @@ Flags:
   - :whale: `--driver=bridge`: Default driver for unix
   - :whale: `--driver=macvlan`: Macvlan network driver for unix
   - :whale: `--driver=ipvlan`: IPvlan network driver for unix
-  - :whale: :blue_square: `--driver=nat`: Default driver for windows
+  - :whale: `--driver=nat`: Default driver for windows
 - :whale: `-o, --opt`: Set driver specific options
   - :whale: `--opt=com.docker.network.driver.mtu=<MTU>`: Set the containers network MTU
   - :nerd_face: `--opt=mtu=<MTU>`: Alias of `--opt=com.docker.network.driver.mtu=<MTU>`
+  - :whale: `--opt=com.docker.network.bridge.enable_icc=<true/false>`: Enable or Disable inter-container connectivity
+  - :nerd_face: `--opt=icc=<true/false>`: Alias of `--opt=com.docker.network.bridge.enable_icc`
   - :whale: `--opt=macvlan_mode=(bridge)>`: Set macvlan network mode (default: bridge)
   - :whale: `--opt=ipvlan_mode=(l2|l3)`: Set IPvlan network mode (default: l2)
   - :nerd_face: `--opt=mode=(bridge|l2|l3)`: Alias of `--opt=macvlan_mode=(bridge)` and `--opt=ipvlan_mode=(l2|l3)`
   - :whale: `--opt=parent=<INTERFACE>`: Set valid parent interface on host
 - :whale: `--ipam-driver=(default|host-local|dhcp)`: IP Address Management Driver
-  - :whale: :blue_square: `--ipam-driver=default`: Default IPAM driver
+  - :whale: `--ipam-driver=default`: Default IPAM driver
   - :nerd_face: `--ipam-driver=host-local`: Host-local IPAM driver for unix
   - :nerd_face: `--ipam-driver=dhcp`: DHCP IPAM driver for unix, requires root
 - :whale: `--ipam-opt`: Set IPAM driver specific options
 - :whale: `--subnet`: Subnet in CIDR format that represents a network segment, e.g. "10.5.0.0/16"
-- :whale: `--gateway`: Gateway for the master subnet
+- :whale: `--gateway`: IPv4 or IPv6 Gateway for the master subnet
 - :whale: `--ip-range`: Allocate container ip from a sub-range
+- :whale: `--aux-address`: Auxiliary IPv4 or IPv6 addresses, as `name=IP` pairs. Each IP is reserved and never assigned to a container. Repeatable, and matched to the subnet that contains it.
 - :whale: `--label`: Set metadata on a network
+- :whale: `--ipv4`: Enable IPv4. Enabled by default; set to false with `--ipv6` and an IPv6 subnet for an IPv6-only network. `--ipv4=false` is not supported on Windows.
 - :whale: `--ipv6`: Enable IPv6. Should be used with a valid subnet.
+- :whale: `--internal`: Restrict external access to the network.
 
-Unimplemented `docker network create` flags: `--attachable`, `--aux-address`, `--config-from`, `--config-only`, `--ingress`, `--internal`, `--scope`
+Unimplemented `docker network create` flags: `--attachable`, `--config-from`, `--config-only`, `--ingress`, `--scope`
 
 ### :whale: nerdctl network ls
 
@@ -1193,7 +1448,7 @@ Unimplemented `docker volume prune` flags: `--filter`
 
 ## Namespace management
 
-### :nerd_face: :blue_square: nerdctl namespace create
+### :nerd_face: nerdctl namespace create
 
 Create a new namespace.
 
@@ -1202,13 +1457,13 @@ Flags:
 
 - `--label`: Set labels for a namespace
 
-### :nerd_face: :blue_square: nerdctl namespace inspect
+### :nerd_face: nerdctl namespace inspect
 
 Inspect a namespace.
 
 Usage: `nerdctl namespace inspect NAMESPACE`
 
-### :nerd_face: :blue_square: nerdctl namespace ls
+### :nerd_face: nerdctl namespace ls
 
 List containerd namespaces such as "default", "moby", or "k8s.io".
 
@@ -1217,8 +1472,9 @@ Usage: `nerdctl namespace ls [OPTIONS]`
 Flags:
 
 - `-q, --quiet`: Only display namespace names
+- `-f, --format`: Format the output using the given Go template, e.g, `{{json .}}`
 
-### :nerd_face: :blue_square: nerdctl namespace remove
+### :nerd_face: nerdctl namespace remove
 
 Remove one or more namespaces.
 
@@ -1228,7 +1484,7 @@ Flags:
 
 - `-c, --cgroup`: delete the namespace's cgroup
 
-### :nerd_face: :blue_square: nerdctl namespace update
+### :nerd_face: nerdctl namespace update
 
 Update labels for a namespace.
 
@@ -1345,6 +1601,38 @@ Flags:
 
 - :whale: `-f, --format`: Format the output using the given Go template, e.g, `{{json .}}`
 
+### :whale: nerdctl system df
+
+Show nerdctl disk usage
+
+Usage: `nerdctl system df [OPTIONS]`
+
+Flags:
+
+- :whale: `-v, --verbose`: Show detailed information on space usage
+- :whale: `--format`: Format the output using the given Go template, e.g, `{{json .}}`.
+  `table` prints the default columns, and `table TEMPLATE` (e.g. `table {{.Type}}\t{{.Size}}`)
+  prints the columns of the template with a header and aligned columns.
+
+The images, containers and volumes are reported for the current namespace only. The build cache is
+not namespaced by containerd; it is reported for the BuildKit host associated with the namespace,
+and shows up as empty when BuildKit is not running.
+
+The sizes follow Docker v29: the size of an image is the content present in the content store plus
+its unpacked snapshots, and the `SIZE` column of the `Images` row counts anything shared between
+images only once, so it is smaller than the sum of the individual image sizes.
+
+Example:
+
+```console
+$ nerdctl system df
+TYPE             TOTAL    ACTIVE    SIZE       RECLAIMABLE
+Images           17       1         18.25GB    17.26GB (94%)
+Containers       3        3         169.2MB    0B (0%)
+Local Volumes    4        3         798.6GB    22.62MB (0%)
+Build Cache      44       0         0B         0B
+```
+
 ### :whale: nerdctl system prune
 
 Remove unused data
@@ -1452,7 +1740,7 @@ Flags:
 - :whale: `--pull`: Pull image before running ("always"|"missing"|"never")
 
 Unimplemented `docker-compose up` (V1) flags: `--no-deps`, `--always-recreate-deps`,
-`--no-start`, `--abort-on-container-exit`, `--attach-dependencies`, `--timeout`, `--renew-anon-volumes`, `--exit-code-from`
+`--no-start`, `--attach-dependencies`, `--timeout`, `--renew-anon-volumes`, `--exit-code-from`
 
 Unimplemented `docker compose up` (V2) flags: `--environment`
 
@@ -1606,7 +1894,7 @@ Push service images
 
 Usage: `nerdctl compose push [OPTIONS] [SERVICE...]`
 
-Unimplemented `docker-compose pull` (V1) flags: `--ignore-push-failures`
+Unimplemented `docker-compose push` (V1) flags: `--ignore-push-failures`
 
 ### :whale: nerdctl compose pause
 
@@ -1698,7 +1986,7 @@ Flags:
 - :whale: `-d, —detach`: Detached mode: Run containers in the background.
 - :whale: `--entrypoint`: Overwrite the default ENTRYPOINT of the image.
 - :whale: `-e, —env`: Set environment variables.
-- :whale: `-i, —interactive`: Keep STDIN open even if not attached (default true).
+- :whale: `-i, —interactive`: Keep STDIN open even if not attached (default true; false with `--detach`).
 - :whale: `-l, —label`: Set metadata on container.
 - :whale: `--name`: Assign a name to the container.
 - :whale: `--no-build`: Don't build an image, even if it's missing.
@@ -1759,54 +2047,56 @@ Flags:
 
 ## Global flags
 
-- :nerd_face: :blue_square: `--address`:  containerd address, optionally with "unix://" prefix
-- :nerd_face: :blue_square: `-a`, `--host`, `-H`: deprecated aliases of `--address`
-- :nerd_face: :blue_square: `--namespace`: containerd namespace
-- :nerd_face: :blue_square: `-n`: deprecated alias of `--namespace`
-- :nerd_face: :blue_square: `--snapshotter`: containerd snapshotter
-- :nerd_face: :blue_square: `--storage-driver`: deprecated alias of `--snapshotter`
-- :nerd_face: :blue_square: `--cni-path`: CNI binary path (default: `/opt/cni/bin`) [`$CNI_PATH`]
-- :nerd_face: :blue_square: `--cni-netconfpath`: CNI netconf path (default: `/etc/cni/net.d`) [`$NETCONFPATH`]
-- :nerd_face: :blue_square: `--data-root`: nerdctl data root, e.g. "/var/lib/nerdctl"
+- :nerd_face: `--address`:  containerd address, optionally with "unix://" prefix
+- :nerd_face: `-a`, `--host`, `-H`: deprecated aliases of `--address`
+- :nerd_face: `--namespace`: containerd namespace
+- :nerd_face: `-n`: deprecated alias of `--namespace`
+- :nerd_face: `--snapshotter`: containerd snapshotter
+- :nerd_face: `--storage-driver`: deprecated alias of `--snapshotter`
+- :nerd_face: `--cni-path`: CNI binary path (default: `/opt/cni/bin`) [`$CNI_PATH`]
+- :nerd_face: `--cni-netconfpath`: CNI netconf path (default: `/etc/cni/net.d`) [`$NETCONFPATH`]
+- :nerd_face: `--data-root`: nerdctl data root, e.g. "/var/lib/nerdctl"
 - :nerd_face: `--cgroup-manager=(cgroupfs|systemd|none)`: cgroup manager
   - Default: "systemd" on cgroup v2 (rootful & rootless), "cgroupfs" on v1 rootful, "none" on v1 rootless
 - :nerd_face: `--insecure-registry`: skips verifying HTTPS certs, and allows falling back to plain HTTP
 - :nerd_face: `--host-gateway-ip`: IP address that the special 'host-gateway' string in --add-host resolves to. It has no effect without setting --add-host
   - Default: the IP address of the host
 - :nerd_face: `--userns-remap=<username>:<groupname>`: Support idmapping of containers. This options is only supported on rootful linux for container create and run if a user name and optionally group name is passed, it does idmapping based on the uidmap and gidmap ranges specified in /etc/subuid and /etc/subgid respectively. Note: `--userns-remap` is not supported for building containers. Nerdctl Build doesn't support userns-remap feature. (format: <name|uid>[:<group|gid>])
+- :nerd_face: `--selinux-enabled`: Enable selinux support
+- :nerd_face: `--log-file`: Append nerdctl's own log to this file, in addition to the standard error [`$NERDCTL_LOG_FILE`]
+  - Combine with `--debug` to record a full trace, e.g. to diagnose a failing `nerdctl run`
+  - The file is appended to, never truncated, so concurrent nerdctl invocations can share it. Rotation is left to `logrotate` or an equivalent
 
 The global flags can be also specified in `/etc/nerdctl/nerdctl.toml` (rootful) and `~/.config/nerdctl/nerdctl.toml` (rootless).
 See [`./config.md`](./config.md).
 
 ## Unimplemented Docker commands
 
-Container management:
-
-- `docker diff`
-- `docker checkpoint *`
-
 Image:
 
-- `docker export` and `docker import`
 - `docker trust *` (Instead, nerdctl supports `nerdctl pull --verify=cosign|notation` and `nerdctl push --sign=cosign|notation`. See [`./cosign.md`](./cosign.md) and [`./notation.md`](./notation.md).)
-- `docker manifest *`
 
 Network management:
 
 - `docker network connect`
 - `docker network disconnect`
 
-Registry:
-
-- `docker search`
-
 Compose:
 
-- `docker-compose events|scale`
+- `docker compose attach`
+- `docker compose events`
+- `docker compose ls`
+- `docker compose scale`
+- `docker compose stats`
+- `docker compose wait`
+- `docker compose watch`
+
+Builder:
+
+- `docker buildx debug` (buildx debugger)
 
 Others:
 
-- `docker system df`
 - `docker context`
 - Swarm commands are unimplemented and will not be implemented: `docker swarm|node|service|config|secret|stack *`
 - Plugin commands are unimplemented and will not be implemented: `docker plugin *`

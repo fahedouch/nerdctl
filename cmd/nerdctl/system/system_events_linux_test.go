@@ -28,6 +28,14 @@ import (
 	"github.com/containerd/nerdctl/v2/pkg/testutil/nerdtest"
 )
 
+// startEventOutput returns the substring expected in the JSON output of a
+// container "start" event. Docker v29 dropped the legacy top-level "status"
+// field from the events API in favor of "Action"
+// (https://github.com/moby/moby/pull/50832), and nerdctl now matches that.
+func startEventOutput() string {
+	return "\"Action\":\"start\""
+}
+
 func testEventFilterExecutor(data test.Data, helpers test.Helpers) test.TestableCommand {
 	helpers.Ensure("pull", testutil.CommonImage)
 	cmd := helpers.Command("events", "--filter", data.Labels().Get("filter"), "--format", "json")
@@ -35,6 +43,27 @@ func testEventFilterExecutor(data test.Data, helpers test.Helpers) test.Testable
 	cmd.WithTimeout(10 * time.Second)
 	cmd.Background()
 	helpers.Ensure("run", "--rm", testutil.CommonImage)
+	return cmd
+}
+
+func testEventLabelFilterExecutor(data test.Data, helpers test.Helpers) test.TestableCommand {
+	helpers.Ensure("pull", testutil.CommonImage)
+
+	cmd := helpers.Command("events", "--filter", data.Labels().Get("filter"), "--format", "json")
+	cmd.WithTimeout(10 * time.Second)
+	cmd.Background()
+
+	helpers.Ensure(
+		"run",
+		"-d",
+		"--name", data.Identifier(),
+		"--label", data.Labels().Get("containerLabel"),
+		testutil.CommonImage,
+		"tail", "-f", "/dev/null",
+	)
+	time.Sleep(1 * time.Second)
+	helpers.Ensure("rm", "-f", data.Identifier())
+
 	return cmd
 }
 
@@ -54,7 +83,7 @@ func TestEventFilters(t *testing.T) {
 			},
 			Data: test.WithLabels(map[string]string{
 				"filter": "event=START",
-				"output": "\"Status\":\"start\"",
+				"output": "\"Action\":\"start\"",
 			}),
 		},
 		{
@@ -68,7 +97,7 @@ func TestEventFilters(t *testing.T) {
 			},
 			Data: test.WithLabels(map[string]string{
 				"filter": "event=start",
-				"output": "tatus\":\"start\"",
+				"output": startEventOutput(),
 			}),
 		},
 		{
@@ -83,7 +112,7 @@ func TestEventFilters(t *testing.T) {
 			},
 			Data: test.WithLabels(map[string]string{
 				"filter": "event=unknown",
-				"output": "\"Status\":\"unknown\"",
+				"output": "\"Action\":\"unknown\"",
 			}),
 		},
 		{
@@ -97,7 +126,7 @@ func TestEventFilters(t *testing.T) {
 			},
 			Data: test.WithLabels(map[string]string{
 				"filter": "status=start",
-				"output": "tatus\":\"start\"",
+				"output": startEventOutput(),
 			}),
 		},
 		{
@@ -112,7 +141,37 @@ func TestEventFilters(t *testing.T) {
 			},
 			Data: test.WithLabels(map[string]string{
 				"filter": "status=unknown",
-				"output": "\"Status\":\"unknown\"",
+				"output": "\"Action\":\"unknown\"",
+			}),
+		},
+		{
+			Description: "LabelFilter",
+			Command:     testEventLabelFilterExecutor,
+			Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
+				return &test.Expected{
+					ExitCode: expect.ExitCodeTimeout,
+					Output:   expect.Contains(data.Labels().Get("output")),
+				}
+			},
+			Data: test.WithLabels(map[string]string{
+				"filter":         "label=com.example.app=myapp",
+				"containerLabel": "com.example.app=myapp",
+				"output":         startEventOutput(),
+			}),
+		},
+		{
+			Description: "LabelKeyOnlyFilter",
+			Command:     testEventLabelFilterExecutor,
+			Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
+				return &test.Expected{
+					ExitCode: expect.ExitCodeTimeout,
+					Output:   expect.Contains(data.Labels().Get("output")),
+				}
+			},
+			Data: test.WithLabels(map[string]string{
+				"filter":         "label=com.example.app",
+				"containerLabel": "com.example.app=myapp",
+				"output":         startEventOutput(),
 			}),
 		},
 	}

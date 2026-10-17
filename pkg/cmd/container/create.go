@@ -25,7 +25,9 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -47,17 +49,21 @@ import (
 	"github.com/containerd/nerdctl/v2/pkg/containerutil"
 	"github.com/containerd/nerdctl/v2/pkg/dnsutil/hostsstore"
 	"github.com/containerd/nerdctl/v2/pkg/flagutil"
+	"github.com/containerd/nerdctl/v2/pkg/healthcheck"
 	"github.com/containerd/nerdctl/v2/pkg/idgen"
 	"github.com/containerd/nerdctl/v2/pkg/imgutil"
 	"github.com/containerd/nerdctl/v2/pkg/imgutil/load"
 	"github.com/containerd/nerdctl/v2/pkg/inspecttypes/dockercompat"
+	"github.com/containerd/nerdctl/v2/pkg/internal/filesystem"
 	"github.com/containerd/nerdctl/v2/pkg/ipcutil"
 	"github.com/containerd/nerdctl/v2/pkg/labels"
 	"github.com/containerd/nerdctl/v2/pkg/logging"
 	"github.com/containerd/nerdctl/v2/pkg/maputil"
 	"github.com/containerd/nerdctl/v2/pkg/mountutil"
 	"github.com/containerd/nerdctl/v2/pkg/namestore"
+	"github.com/containerd/nerdctl/v2/pkg/netutil/networkstore"
 	"github.com/containerd/nerdctl/v2/pkg/platformutil"
+	"github.com/containerd/nerdctl/v2/pkg/portutil"
 	"github.com/containerd/nerdctl/v2/pkg/referenceutil"
 	"github.com/containerd/nerdctl/v2/pkg/rootlessutil"
 	"github.com/containerd/nerdctl/v2/pkg/store"
@@ -65,7 +71,7 @@ import (
 )
 
 // Create will create a container.
-func Create(ctx context.Context, client *containerd.Client, args []string, netManager containerutil.NetworkOptionsManager, options types.ContainerCreateOptions) (containerd.Container, func(), error) {
+func Create(ctx context.Context, client *containerd.Client, args []string, netManager containerutil.NetworkOptionsManager, options types.ContainerCreateOptions) (_ containerd.Container, _ func(), retErr error) {
 	// Acquire an exclusive lock on the volume store until we are done to avoid being raced by any other
 	// volume operations (or any other operation involving volume manipulation)
 	volStore, err := volume.Store(options.GOptions.Namespace, options.GOptions.DataRoot, options.GOptions.Address)
@@ -88,6 +94,27 @@ func Create(ctx context.Context, client *containerd.Client, args []string, netMa
 	var internalLabels internalLabels
 	internalLabels.platform = options.Platform
 	internalLabels.namespace = options.GOptions.Namespace
+
+	// If creation fails after image-mount state is created, tear it down so the
+	// snapshots and host mounts do not leak (the cleanup labels are only persisted
+	// on success).
+	defer func() {
+		if retErr == nil {
+			return
+		}
+		var keys, hostpaths []string
+		for _, mp := range internalLabels.mountPoints {
+			if mp.ImageMountSnapshot != "" {
+				keys = append(keys, mp.ImageMountSnapshot)
+			}
+			if mp.ImageMountHostpath != "" {
+				hostpaths = append(hostpaths, mp.ImageMountHostpath)
+			}
+		}
+		if len(keys) > 0 || len(hostpaths) > 0 {
+			removeImageMounts(ctx, client.SnapshotService(options.GOptions.Snapshotter), hostpaths, keys)
+		}
+	}()
 
 	var (
 		id    = idgen.GenerateID()
@@ -124,7 +151,14 @@ func Create(ctx context.Context, client *containerd.Client, args []string, netMa
 	}
 	opts = append(opts, platformOpts...)
 
-	opts = append(opts, withCDIDevices(options.GOptions.CDISpecDirs, options.CDIDevices...))
+	if len(options.CDIDevices) > 0 || len(options.GPUs) > 0 {
+		opts = append(opts, withStaticCDIRegistry(options.GOptions.CDISpecDirs))
+	}
+
+	opts = append(opts,
+		withGPUs(options.GPUs...),
+		withCDIDevices(options.CDIDevices...),
+	)
 
 	if _, err := referenceutil.Parse(args[0]); errors.Is(err, referenceutil.ErrLoadOCIArchiveRequired) {
 		imageRef := args[0]
@@ -185,6 +219,12 @@ func Create(ctx context.Context, client *containerd.Client, args []string, netMa
 		internalLabels.user = ensuredImage.ImageConfig.User
 	}
 
+	// Pin the image the container is created from. containerd only records the image name, and a
+	// name can later be retagged onto a different image.
+	if ensuredImage != nil && ensuredImage.Image != nil {
+		internalLabels.imageDigest = ensuredImage.Image.Target().Digest.String()
+	}
+
 	// Override it if User is passed
 	if options.User != "" {
 		internalLabels.user = options.User
@@ -193,6 +233,12 @@ func Create(ctx context.Context, client *containerd.Client, args []string, netMa
 	rootfsOpts, rootfsCOpts, err := generateRootfsOpts(args, id, ensuredImage, options)
 	if err != nil {
 		return nil, generateRemoveStateDirFunc(ctx, id, internalLabels), err
+	}
+	// Image config labels must be applied before any other label-setting opt:
+	// containerd.WithImageConfigLabels resets the container labels, so running it
+	// later would clear labels set by other opts (e.g. the restart policy).
+	if ensuredImage != nil {
+		cOpts = append(cOpts, containerd.WithImageConfigLabels(ensuredImage.Image), withoutReservedLabels())
 	}
 	opts = append(opts, rootfsOpts...)
 	cOpts = append(cOpts, rootfsCOpts...)
@@ -235,10 +281,11 @@ func Create(ctx context.Context, client *containerd.Client, args []string, netMa
 		return nil, generateRemoveStateDirFunc(ctx, id, internalLabels), err
 	}
 
-	if options.Interactive {
-		if options.Detach {
-			return nil, generateRemoveStateDirFunc(ctx, id, internalLabels), errors.New("currently flag -i and -d cannot be specified together (FIXME)")
-		}
+	// -i with -d requires -t. Without a pty, nerdctl (being daemonless) has no
+	// process to keep the container's stdin open after it detaches, so the
+	// process would read EOF immediately; with -t the shim holds the pty open.
+	if options.Interactive && options.Detach && !options.TTY {
+		return nil, generateRemoveStateDirFunc(ctx, id, internalLabels), errors.New("combination of flags -i and -d can only be specified together with -t")
 	}
 
 	if options.TTY {
@@ -268,11 +315,36 @@ func Create(ctx context.Context, client *containerd.Client, args []string, netMa
 		internalLabels.logConfig.Driver = "json-file"
 	}
 
-	restartOpts, err := generateRestartOpts(ctx, client, options.Restart, logConfig.LogURI, options.InRun)
+	restartOpts, err := generateRestartOpts(ctx, client, options.Restart, logConfig.LogURI)
 	if err != nil {
 		return nil, generateRemoveStateDirFunc(ctx, id, internalLabels), err
 	}
 	cOpts = append(cOpts, restartOpts...)
+
+	var imageExposedPorts map[string]struct{}
+
+	if ensuredImage != nil {
+		imageExposedPorts = ensuredImage.ImageConfig.ExposedPorts
+	}
+
+	exposedPorts := mergeExposedPorts(imageExposedPorts, netManager.NetworkOptions().ExposedPorts)
+
+	internalLabels.exposedPorts = exposedPorts
+
+	if netManager.NetworkOptions().PublishAll {
+		publishAllPortMappings, err := generatePublishAllPortMappings(exposedPorts)
+		if err != nil {
+			return nil, generateRemoveStateDirFunc(ctx, id, internalLabels), err
+		}
+
+		netOpts := netManager.NetworkOptions()
+		netOpts.PortMappings = append(netOpts.PortMappings, publishAllPortMappings...)
+
+		netManager, err = containerutil.NewNetworkingOptionsManager(options.GOptions, netOpts, client)
+		if err != nil {
+			return nil, generateRemoveStateDirFunc(ctx, id, internalLabels), err
+		}
+	}
 
 	if err = netManager.VerifyNetworkOptions(ctx); err != nil {
 		return nil, generateRemoveStateDirFunc(ctx, id, internalLabels), fmt.Errorf("failed to verify networking settings: %w", err)
@@ -326,21 +398,33 @@ func Create(ctx context.Context, client *containerd.Client, args []string, netMa
 	}
 	opts = append(opts, umaskOpts...)
 
+	if !isHostNetwork(netLabelOpts) {
+		opts = append(opts, withDefaultUnprivilegedPortSysctl())
+	}
+
 	rtCOpts, err := generateRuntimeCOpts(options.GOptions.CgroupManager, options.Runtime)
 	if err != nil {
 		return nil, generateRemoveOrphanedDirsFunc(ctx, id, dataStore, internalLabels), err
 	}
 	cOpts = append(cOpts, rtCOpts...)
 
-	lCOpts, err := withContainerLabels(options.Label, options.LabelFile, ensuredImage)
+	// Generate health check config based on CLI flags and image.
+	healthcheckConfig, err := withHealthcheck(options, ensuredImage)
+	if err != nil {
+		return nil, generateRemoveOrphanedDirsFunc(ctx, id, dataStore, internalLabels), err
+	}
+	if healthcheckConfig != "" {
+		internalLabels.healthcheck = healthcheckConfig
+	}
+
+	lCOpts, err := withContainerLabels(options.Label, options.LabelFile)
 	if err != nil {
 		return nil, generateRemoveOrphanedDirsFunc(ctx, id, dataStore, internalLabels), err
 	}
 	cOpts = append(cOpts, lCOpts...)
 
 	var containerNameStore namestore.NameStore
-	if options.Name == "" && !options.NameChanged {
-		// Automatically set the container name, unless `--name=""` was explicitly specified.
+	if options.Name == "" {
 		var imageRef string
 		if ensuredImage != nil {
 			imageRef = ensuredImage.Ref
@@ -352,15 +436,15 @@ func Create(ctx context.Context, client *containerd.Client, args []string, netMa
 		}
 		options.Name = parsedReference.SuggestContainerName(id)
 	}
-	if options.Name != "" {
-		containerNameStore, err = namestore.New(dataStore, options.GOptions.Namespace)
-		if err != nil {
-			return nil, generateRemoveOrphanedDirsFunc(ctx, id, dataStore, internalLabels), err
-		}
-		if err := containerNameStore.Acquire(options.Name, id); err != nil {
-			return nil, generateRemoveOrphanedDirsFunc(ctx, id, dataStore, internalLabels), err
-		}
+
+	containerNameStore, err = namestore.New(dataStore, options.GOptions.Namespace)
+	if err != nil {
+		return nil, generateRemoveOrphanedDirsFunc(ctx, id, dataStore, internalLabels), err
 	}
+	if err := containerNameStore.Acquire(options.Name, id); err != nil {
+		return nil, generateRemoveOrphanedDirsFunc(ctx, id, dataStore, internalLabels), err
+	}
+
 	internalLabels.name = options.Name
 	internalLabels.pidFile = options.PidFile
 
@@ -371,6 +455,7 @@ func Create(ctx context.Context, client *containerd.Client, args []string, netMa
 	internalLabels.extraHosts = extraHosts
 
 	internalLabels.rm = containerutil.EncodeContainerRmOptLabel(options.Rm)
+	internalLabels.privileged = options.Privileged
 
 	// TODO: abolish internal labels and only use annotations
 	ilOpt, err := withInternalLabels(internalLabels)
@@ -378,6 +463,14 @@ func Create(ctx context.Context, client *containerd.Client, args []string, netMa
 		return nil, generateRemoveOrphanedDirsFunc(ctx, id, dataStore, internalLabels), err
 	}
 	cOpts = append(cOpts, ilOpt)
+
+	netConf := networkstore.NetworkConfig{
+		PortMappings: netLabelOpts.PortMappings,
+	}
+	err = portutil.StoreNetworkConfig(dataStore, options.GOptions.Namespace, id, netConf)
+	if err != nil {
+		return nil, generateRemoveOrphanedDirsFunc(ctx, id, dataStore, internalLabels), fmt.Errorf("Error writing to network-config.json: %v", err)
+	}
 
 	opts = append(opts, propagateInternalContainerdLabelsToOCIAnnotations(),
 		oci.WithAnnotations(strutil.ConvertKVStringsToMap(options.Annotations)))
@@ -405,6 +498,40 @@ func Create(ctx context.Context, client *containerd.Client, args []string, netMa
 	}
 
 	return c, nil, nil
+}
+
+func mergeExposedPorts(imageExposedPorts map[string]struct{}, cliExposedPorts []string) map[string]struct{} {
+	exposedPorts := map[string]struct{}{}
+
+	for port := range imageExposedPorts {
+		exposedPorts[port] = struct{}{}
+	}
+
+	for _, port := range cliExposedPorts {
+		if port == "" {
+			continue
+		}
+		if !strings.Contains(port, "/") {
+			port += "/tcp"
+		}
+		exposedPorts[port] = struct{}{}
+	}
+
+	return exposedPorts
+}
+
+func generatePublishAllPortMappings(exposedPorts map[string]struct{}) ([]cni.PortMapping, error) {
+	var portMappings []cni.PortMapping
+
+	for port := range exposedPorts {
+		pm, err := portutil.ParseFlagP(port)
+		if err != nil {
+			return nil, err
+		}
+		portMappings = append(portMappings, pm...)
+	}
+
+	return portMappings, nil
 }
 
 func generateRootfsOpts(args []string, id string, ensured *imgutil.EnsuredImage, options types.ContainerCreateOptions) (opts []oci.SpecOpts, cOpts []containerd.NewContainerOpts, err error) {
@@ -493,7 +620,7 @@ func generateRootfsOpts(args []string, id string, ensured *imgutil.EnsuredImage,
 				{Type: "tmpfs", Source: "tmpfs", Destination: "/run"},
 				{Type: "tmpfs", Source: "tmpfs", Destination: "/run/lock"},
 				{Type: "tmpfs", Source: "tmpfs", Destination: "/tmp"},
-				{Type: "tmpfs", Source: "tmpfs", Destination: "/var/lib/journal"},
+				{Type: "tmpfs", Source: "tmpfs", Destination: "/var/log/journal"},
 			}),
 		)
 		stopSignal = "SIGRTMIN+3"
@@ -541,6 +668,32 @@ func GenerateLogURI(dataStore string) (*url.URL, error) {
 	}
 
 	return cio.LogURIGenerator("binary", selfExe, args)
+}
+
+func isHostNetwork(netOpts types.NetworkOptions) bool {
+	return slices.Contains(netOpts.NetworkSlice, "host")
+}
+
+// withDefaultUnprivilegedPortSysctl ensures that containers can bind to
+// privileged ports (<1024) without requiring CAP_NET_BIND_SERVICE inside
+// the container by defaulting net.ipv4.ip_unprivileged_port_start to 0
+// in the container's network namespace.
+func withDefaultUnprivilegedPortSysctl() oci.SpecOpts {
+	const key = "net.ipv4.ip_unprivileged_port_start"
+	return func(_ context.Context, _ oci.Client, _ *containers.Container, s *oci.Spec) error {
+		if s.Linux == nil {
+			// NOP, as the target platform is not Linux
+			return nil
+		}
+		if s.Linux.Sysctl == nil {
+			s.Linux.Sysctl = make(map[string]string)
+		}
+
+		if _, exists := s.Linux.Sysctl[key]; !exists {
+			s.Linux.Sysctl[key] = "0"
+		}
+		return nil
+	}
 }
 
 func withNerdctlOCIHook(cmd string, args []string) (oci.SpecOpts, error) {
@@ -591,14 +744,24 @@ func withNerdctlOCIHook(cmd string, args []string) (oci.SpecOpts, error) {
 	}, nil
 }
 
-func withContainerLabels(label, labelFile []string, ensuredImage *imgutil.EnsuredImage) ([]containerd.NewContainerOpts, error) {
-	var opts []containerd.NewContainerOpts
-
-	// add labels defined by image
-	if ensuredImage != nil {
-		imageLabelOpts := containerd.WithAdditionalContainerLabels(ensuredImage.ImageConfig.Labels)
-		opts = append(opts, imageLabelOpts)
+// withoutReservedLabels drops labels in the internal "nerdctl/" namespace. It runs
+// right after WithImageConfigLabels, the one path that can set them without going
+// through --label (which rejects the prefix): otherwise an image could forge
+// internal state, e.g. the image-mount host paths that `nerdctl rm` deletes.
+func withoutReservedLabels() containerd.NewContainerOpts {
+	return func(_ context.Context, _ *containerd.Client, c *containers.Container) error {
+		for k := range c.Labels {
+			if strings.HasPrefix(k, labels.Prefix) {
+				log.L.Warnf("Ignoring reserved label %q set by the image config", k)
+				delete(c.Labels, k)
+			}
+		}
+		return nil
 	}
+}
+
+func withContainerLabels(label, labelFile []string) ([]containerd.NewContainerOpts, error) {
+	var opts []containerd.NewContainerOpts
 
 	labelMap, err := readKVStringsMapfFromLabel(label, labelFile)
 	if err != nil {
@@ -674,11 +837,12 @@ type internalLabels struct {
 	domainname string
 	// automatically generated
 	stateDir string
+	// the digest of the image target the container was created from
+	imageDigest string
 	// network
 	networks             []string
 	ipAddress            string
 	ip6Address           string
-	ports                []cni.PortMapping
 	macAddress           string
 	dnsServers           []string
 	dnsSearchDomains     []string
@@ -706,6 +870,12 @@ type internalLabels struct {
 	deviceMapping []dockercompat.DeviceMapping
 
 	user string
+
+	healthcheck string
+
+	privileged bool
+
+	exposedPorts map[string]struct{}
 }
 
 // WithInternalLabels sets the internal labels for a container.
@@ -714,9 +884,7 @@ func withInternalLabels(internalLabels internalLabels) (containerd.NewContainerO
 	var hostConfigLabel dockercompat.HostConfigLabel
 	var dnsSettings dockercompat.DNSSettings
 	m[labels.Namespace] = internalLabels.namespace
-	if internalLabels.name != "" {
-		m[labels.Name] = internalLabels.name
-	}
+	m[labels.Name] = internalLabels.name
 	m[labels.Hostname] = internalLabels.hostname
 	m[labels.Domainname] = internalLabels.domainname
 	extraHostsJSON, err := json.Marshal(internalLabels.extraHosts)
@@ -730,13 +898,6 @@ func withInternalLabels(internalLabels internalLabels) (containerd.NewContainerO
 		return nil, err
 	}
 	m[labels.Networks] = string(networksJSON)
-	if len(internalLabels.ports) > 0 {
-		portsJSON, err := json.Marshal(internalLabels.ports)
-		if err != nil {
-			return nil, err
-		}
-		m[labels.Ports] = string(portsJSON)
-	}
 	if internalLabels.logURI != "" {
 		m[labels.LogURI] = internalLabels.logURI
 		logConfigJSON, err := json.Marshal(internalLabels.logConfig)
@@ -751,6 +912,32 @@ func withInternalLabels(internalLabels internalLabels) (containerd.NewContainerO
 			return nil, err
 		}
 		m[labels.AnonymousVolumes] = string(anonVolumeJSON)
+	}
+
+	// Record the snapshot keys and host materialization paths of any type=image
+	// mounts so they can be removed when the container is deleted.
+	var imageMountSnapshots, imageMountHostpaths []string
+	for _, mp := range internalLabels.mountPoints {
+		if mp.ImageMountSnapshot != "" {
+			imageMountSnapshots = append(imageMountSnapshots, mp.ImageMountSnapshot)
+		}
+		if mp.ImageMountHostpath != "" {
+			imageMountHostpaths = append(imageMountHostpaths, mp.ImageMountHostpath)
+		}
+	}
+	if len(imageMountSnapshots) > 0 {
+		b, err := json.Marshal(imageMountSnapshots)
+		if err != nil {
+			return nil, err
+		}
+		m[labels.ImageMountSnapshots] = string(b)
+	}
+	if len(imageMountHostpaths) > 0 {
+		b, err := json.Marshal(imageMountHostpaths)
+		if err != nil {
+			return nil, err
+		}
+		m[labels.ImageMountHostpaths] = string(b)
 	}
 
 	if internalLabels.pidFile != "" {
@@ -770,13 +957,27 @@ func withInternalLabels(internalLabels internalLabels) (containerd.NewContainerO
 		return nil, err
 	}
 
+	if internalLabels.imageDigest != "" {
+		m[labels.ImageDigest] = internalLabels.imageDigest
+	}
+
 	if len(internalLabels.mountPoints) > 0 {
 		mounts := dockercompatMounts(internalLabels.mountPoints)
-		mountPointsJSON, err := json.Marshal(mounts)
+		jsonMountBytes, err := json.Marshal(mounts)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal mounts: %w", err)
+		}
+		if err := labels.SetMount(m, jsonMountBytes); err != nil {
+			return nil, err
+		}
+	}
+
+	if len(internalLabels.exposedPorts) > 0 {
+		exposedPortsJSON, err := json.Marshal(internalLabels.exposedPorts)
 		if err != nil {
 			return nil, err
 		}
-		m[labels.Mounts] = string(mountPointsJSON)
+		m[labels.ExposedPorts] = string(exposedPortsJSON)
 	}
 
 	if internalLabels.macAddress != "" {
@@ -793,6 +994,10 @@ func withInternalLabels(internalLabels internalLabels) (containerd.NewContainerO
 
 	if internalLabels.rm != "" {
 		m[labels.ContainerAutoRemove] = internalLabels.rm
+	}
+
+	if internalLabels.privileged {
+		m[labels.Privileged] = "true"
 	}
 
 	if internalLabels.cidFile != "" {
@@ -831,14 +1036,75 @@ func withInternalLabels(internalLabels internalLabels) (containerd.NewContainerO
 		m[labels.User] = internalLabels.user
 	}
 
+	if len(internalLabels.healthcheck) > 0 {
+		m[labels.HealthCheck] = internalLabels.healthcheck
+	}
+
 	return containerd.WithAdditionalContainerLabels(m), nil
+}
+
+func withHealthcheck(options types.ContainerCreateOptions, ensuredImage *imgutil.EnsuredImage) (string, error) {
+	// If explicitly disabled
+	if options.NoHealthcheck {
+		hc := &healthcheck.Healthcheck{
+			Test: []string{"NONE"},
+		}
+		hcJSON, err := hc.ToJSONString()
+		if err != nil {
+			return "", fmt.Errorf("failed to serialize disabled healthcheck config: %w", err)
+		}
+		return hcJSON, nil
+	}
+
+	// Start with health checks in image if present
+	hc := &healthcheck.Healthcheck{}
+	if ensuredImage != nil && ensuredImage.ImageConfig.Labels != nil {
+		if label := ensuredImage.ImageConfig.Labels[labels.HealthCheck]; label != "" {
+			parsed, err := healthcheck.HealthCheckFromJSON(label)
+			if err != nil {
+				return "", fmt.Errorf("failed to parse healthcheck label in image: %w", err)
+			}
+			hc = parsed
+		}
+	}
+
+	// Apply CLI overrides
+	if options.HealthCmd != "" {
+		hc.Test = []string{"CMD-SHELL", options.HealthCmd}
+	}
+	if options.HealthInterval != 0 {
+		hc.Interval = options.HealthInterval
+	}
+	if options.HealthTimeout != 0 {
+		hc.Timeout = options.HealthTimeout
+	}
+	if options.HealthRetries != 0 {
+		hc.Retries = options.HealthRetries
+	}
+	if options.HealthStartPeriod != 0 {
+		hc.StartPeriod = options.HealthStartPeriod
+	}
+
+	// Apply defaults for any unset values, but only if we have a healthcheck configured
+	if len(hc.Test) > 0 && hc.Test[0] != "NONE" {
+		hc.ApplyDefaults()
+	}
+
+	// If no healthcheck config is set (via CLI or image), return empty string so we skip adding to container config.
+	if reflect.DeepEqual(hc, &healthcheck.Healthcheck{}) {
+		return "", nil
+	}
+	hcJSON, err := hc.ToJSONString()
+	if err != nil {
+		return "", fmt.Errorf("failed to serialize healthcheck config: %w", err)
+	}
+	return hcJSON, nil
 }
 
 // loadNetOpts loads network options into InternalLabels.
 func (il *internalLabels) loadNetOpts(opts types.NetworkOptions) {
 	il.hostname = opts.Hostname
 	il.domainname = opts.Domainname
-	il.ports = opts.PortMappings
 	il.ipAddress = opts.IPAddress
 	il.ip6Address = opts.IP6Address
 	il.networks = opts.NetworkSlice
@@ -954,7 +1220,7 @@ func generateLogConfig(dataStore string, id string, logDriver string, logOpt []s
 		}
 
 		logConfigFilePath := logging.LogConfigFilePath(dataStore, ns, id)
-		if err = os.WriteFile(logConfigFilePath, logConfigB, 0600); err != nil {
+		if err = filesystem.WriteFile(logConfigFilePath, logConfigB, 0600); err != nil {
 			return logConfig, err
 		}
 
@@ -1024,15 +1290,13 @@ func generateGcFunc(ctx context.Context, container containerd.Container, ns, id,
 			log.G(ctx).WithError(rmErr).Warnf("failed to remove container %q state dir %q", id, internalLabels.stateDir)
 		}
 
-		if name != "" {
-			var errE error
-			if containerNameStore, errE = namestore.New(dataStore, ns); errE != nil {
-				log.G(ctx).WithError(errE).Warnf("failed to instantiate container name store during cleanup for container %q", id)
-			}
-			// Double-releasing may happen with containers started with --rm, so, ignore NotFound errors
-			if errE := containerNameStore.Release(name, id); errE != nil && !errors.Is(errE, store.ErrNotFound) {
-				log.G(ctx).WithError(errE).Warnf("failed to release container name store for container %q (%s)", name, id)
-			}
+		var errE error
+		if containerNameStore, errE = namestore.New(dataStore, ns); errE != nil {
+			log.G(ctx).WithError(errE).Warnf("failed to instantiate container name store during cleanup for container %q", id)
+		}
+		// Double-releasing may happen with containers started with --rm, so, ignore NotFound errors
+		if errE := containerNameStore.Release(name, id); errE != nil && !errors.Is(errE, store.ErrNotFound) {
+			log.G(ctx).WithError(errE).Warnf("failed to release container name store for container %q (%s)", name, id)
 		}
 	}
 }

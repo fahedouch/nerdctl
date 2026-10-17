@@ -17,7 +17,6 @@
 package image
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -28,6 +27,7 @@ import (
 	"github.com/containerd/nerdctl/mod/tigron/expect"
 	"github.com/containerd/nerdctl/mod/tigron/require"
 	"github.com/containerd/nerdctl/mod/tigron/test"
+	"github.com/containerd/nerdctl/mod/tigron/tig"
 
 	"github.com/containerd/nerdctl/v2/pkg/testutil"
 	"github.com/containerd/nerdctl/v2/pkg/testutil/nerdtest"
@@ -60,8 +60,8 @@ func TestLoadStdinFromPipe(t *testing.T) {
 			identifier := data.Identifier()
 			return &test.Expected{
 				Output: expect.All(
-					expect.Contains(fmt.Sprintf("Loaded image: %s:latest", identifier)),
-					func(stdout string, info string, t *testing.T) {
+					expect.Contains(identifier),
+					func(stdout string, t tig.T) {
 						assert.Assert(t, strings.Contains(helpers.Capture("images"), identifier))
 					},
 				),
@@ -106,7 +106,7 @@ func TestLoadQuiet(t *testing.T) {
 		Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
 			return &test.Expected{
 				Output: expect.All(
-					expect.Contains(fmt.Sprintf("Loaded image: %s:latest", data.Identifier())),
+					expect.Contains(data.Identifier()),
 					expect.DoesNotContain("Loading layer"),
 				),
 			}

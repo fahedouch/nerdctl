@@ -22,6 +22,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/containerd/nerdctl/v2/pkg/api/types"
+	"github.com/containerd/nerdctl/v2/pkg/fs"
 )
 
 func VerifyOptions(cmd *cobra.Command) (opt types.ImageVerifyOptions, err error) {
@@ -46,12 +47,45 @@ func VerifyOptions(cmd *cobra.Command) (opt types.ImageVerifyOptions, err error)
 	return
 }
 
+func ValidateHealthcheckFlags(options types.ContainerCreateOptions) error {
+	healthFlagsSet :=
+		options.HealthInterval != 0 ||
+			options.HealthTimeout != 0 ||
+			options.HealthRetries != 0 ||
+			options.HealthStartPeriod != 0
+
+	if options.NoHealthcheck {
+		if options.HealthCmd != "" || healthFlagsSet {
+			return fmt.Errorf("--no-healthcheck conflicts with --health-* options")
+		}
+	}
+
+	// Note: HealthCmd can be empty with other healthcheck flags set cause healthCmd could be coming from image.
+	if options.HealthInterval < 0 {
+		return fmt.Errorf("--health-interval cannot be negative")
+	}
+	if options.HealthTimeout < 0 {
+		return fmt.Errorf("--health-timeout cannot be negative")
+	}
+	if options.HealthRetries < 0 {
+		return fmt.Errorf("--health-retries cannot be negative")
+	}
+	if options.HealthStartPeriod < 0 {
+		return fmt.Errorf("--health-start-period cannot be negative")
+	}
+	return nil
+}
+
 func ProcessRootCmdFlags(cmd *cobra.Command) (types.GlobalCommandOptions, error) {
 	debug, err := cmd.Flags().GetBool("debug")
 	if err != nil {
 		return types.GlobalCommandOptions{}, err
 	}
 	debugFull, err := cmd.Flags().GetBool("debug-full")
+	if err != nil {
+		return types.GlobalCommandOptions{}, err
+	}
+	logFile, err := cmd.Flags().GetString("log-file")
 	if err != nil {
 		return types.GlobalCommandOptions{}, err
 	}
@@ -111,10 +145,33 @@ func ProcessRootCmdFlags(cmd *cobra.Command) (types.GlobalCommandOptions, error)
 	if err != nil {
 		return types.GlobalCommandOptions{}, err
 	}
+	dns, err := cmd.Flags().GetStringSlice("global-dns")
+	if err != nil {
+		return types.GlobalCommandOptions{}, err
+	}
+	dnsOpts, err := cmd.Flags().GetStringSlice("global-dns-opts")
+	if err != nil {
+		return types.GlobalCommandOptions{}, err
+	}
+	dnsSearch, err := cmd.Flags().GetStringSlice("global-dns-search")
+	if err != nil {
+		return types.GlobalCommandOptions{}, err
+	}
+
+	selinuxEnabled, err := cmd.Flags().GetBool("selinux-enabled")
+	if err != nil {
+		return types.GlobalCommandOptions{}, err
+	}
+	// Point to dataRoot for filesystem-helpers implementing rollback / backups.
+	err = fs.InitFS(dataRoot)
+	if err != nil {
+		return types.GlobalCommandOptions{}, err
+	}
 
 	return types.GlobalCommandOptions{
 		Debug:            debug,
 		DebugFull:        debugFull,
+		LogFile:          logFile,
 		Address:          address,
 		Namespace:        namespace,
 		Snapshotter:      snapshotter,
@@ -129,6 +186,10 @@ func ProcessRootCmdFlags(cmd *cobra.Command) (types.GlobalCommandOptions, error)
 		BridgeIP:         bridgeIP,
 		KubeHideDupe:     kubeHideDupe,
 		CDISpecDirs:      cdiSpecDirs,
+		DNS:              dns,
+		DNSOpts:          dnsOpts,
+		DNSSearch:        dnsSearch,
+		SelinuxEnabled:   selinuxEnabled,
 	}, nil
 }
 

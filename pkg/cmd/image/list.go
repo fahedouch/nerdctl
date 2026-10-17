@@ -23,21 +23,26 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
+	"slices"
 	"sort"
 	"strings"
 	"text/tabwriter"
 	"text/template"
 	"time"
+	"unicode/utf8"
 
 	"github.com/docker/go-units"
 	"github.com/opencontainers/go-digest"
 	"github.com/opencontainers/image-spec/identity"
 	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
+	"golang.org/x/term"
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/snapshots"
+	"github.com/containerd/errdefs"
 	"github.com/containerd/log"
 	"github.com/containerd/platforms"
 
@@ -45,16 +50,48 @@ import (
 	"github.com/containerd/nerdctl/v2/pkg/containerdutil"
 	"github.com/containerd/nerdctl/v2/pkg/formatter"
 	"github.com/containerd/nerdctl/v2/pkg/imgutil"
+	"github.com/containerd/nerdctl/v2/pkg/labels"
 	"github.com/containerd/nerdctl/v2/pkg/referenceutil"
 )
 
 // ListCommandHandler `List` and print images matching filters in `options`.
 func ListCommandHandler(ctx context.Context, client *containerd.Client, options *types.ImageListOptions) error {
+	if err := ValidateListOptions(options); err != nil {
+		return err
+	}
 	imageList, err := List(ctx, client, options.Filters, options.NameAndRefFilter)
 	if err != nil {
 		return err
 	}
 	return printImages(ctx, client, imageList, options)
+}
+
+// ValidateListOptions rejects option combinations the list views cannot honor, mirroring the
+// checks docker/cli makes in shouldUseTree. Unlike the implicit choice between the default and the
+// legacy view, Tree is an explicit request, so silently falling back would be surprising.
+//
+// It is enforced here, where the options are actually consumed, so that library callers get the
+// error too. The CLI calls it as well, so that the error surfaces before a containerd connection
+// is attempted.
+func ValidateListOptions(options *types.ImageListOptions) error {
+	if !options.Tree {
+		return nil
+	}
+	for _, conflict := range []struct {
+		set  bool
+		flag string
+	}{
+		{options.Quiet, "--quiet"},
+		{options.NoTrunc, "--no-trunc"},
+		{options.Digests, "--digests"},
+		{options.Format != "", "--format"},
+		{options.Names, "--names"},
+	} {
+		if conflict.set {
+			return fmt.Errorf("%s is not yet supported with --tree", conflict.flag)
+		}
+	}
+	return nil
 }
 
 // List queries containerd client to get image list and only returns those matching given filters.
@@ -174,9 +211,19 @@ func printImages(ctx context.Context, client *containerd.Client, imageList []ima
 	if options.Format == "wide" {
 		digestsFlag = true
 	}
+	// newView selects the Docker v29 default output (IMAGE, ID, DISK USAGE, CONTENT SIZE, EXTRA).
+	// Any "old-view" signal (--format, --quiet, --no-trunc, --digests, --names) falls back to the
+	// legacy table, mirroring Docker's tree-view fallback.
+	newView := options.Format == "" && !options.Quiet && !options.NoTrunc && !options.Digests && !options.Names
 	var tmpl *template.Template
-	switch options.Format {
-	case "", "table", "wide":
+	switch {
+	case newView:
+		// The legend is written to the underlying writer before it is wrapped in the tabwriter,
+		// so it is not aligned to the columns below. Like Docker, it is only shown on a terminal.
+		printImagesLegend(w)
+		w = tabwriter.NewWriter(w, 4, 8, 4, ' ', 0)
+		fmt.Fprintln(w, "IMAGE\tID\tDISK USAGE\tCONTENT SIZE\tEXTRA")
+	case options.Format == "", options.Format == "table", options.Format == "wide":
 		w = tabwriter.NewWriter(w, 4, 8, 4, ' ', 0)
 		if !options.Quiet {
 			printHeader := ""
@@ -191,7 +238,7 @@ func printImages(ctx context.Context, client *containerd.Client, imageList []ima
 			printHeader += "IMAGE ID\tCREATED\tPLATFORM\tSIZE\tBLOB SIZE"
 			fmt.Fprintln(w, printHeader)
 		}
-	case "raw":
+	case options.Format == "raw":
 		return errors.New("unsupported format: \"raw\"")
 	default:
 		if options.Quiet {
@@ -204,16 +251,34 @@ func printImages(ctx context.Context, client *containerd.Client, imageList []ima
 		}
 	}
 
+	// In-use detection requires a container scan, so only pay for it in the new view where the
+	// EXTRA column is rendered.
+	var inUse map[digest.Digest]int64
+	var inUseByPlatform map[platformRef]bool
+	if newView {
+		var err error
+		if inUse, inUseByPlatform, err = imagesInUse(ctx, client); err != nil {
+			// The indicator decorates the listing, so failing to compute it must not fail the
+			// listing itself. Unlike the disk usage accounting, nothing here is unsafe to act on.
+			log.G(ctx).WithError(err).Warn("the in-use indicator is unavailable")
+		}
+		sortByImageRef(finalImageList)
+	}
+
 	printer := &imagePrinter{
-		w:           w,
-		quiet:       options.Quiet,
-		noTrunc:     options.NoTrunc,
-		digestsFlag: digestsFlag,
-		namesFlag:   options.Names,
-		tmpl:        tmpl,
-		client:      client,
-		provider:    containerdutil.NewProvider(client),
-		snapshotter: containerdutil.SnapshotService(client, options.GOptions.Snapshotter),
+		w:               w,
+		quiet:           options.Quiet,
+		noTrunc:         options.NoTrunc,
+		digestsFlag:     digestsFlag,
+		namesFlag:       options.Names,
+		newView:         newView,
+		tree:            options.Tree,
+		inUse:           inUse,
+		inUseByPlatform: inUseByPlatform,
+		tmpl:            tmpl,
+		client:          client,
+		provider:        containerdutil.NewProvider(client),
+		snapshotter:     containerdutil.SnapshotService(client, options.GOptions.Snapshotter),
 	}
 
 	for _, img := range finalImageList {
@@ -228,12 +293,14 @@ func printImages(ctx context.Context, client *containerd.Client, imageList []ima
 }
 
 type imagePrinter struct {
-	w                                      io.Writer
-	quiet, noTrunc, digestsFlag, namesFlag bool
-	tmpl                                   *template.Template
-	client                                 *containerd.Client
-	provider                               content.Provider
-	snapshotter                            snapshots.Snapshotter
+	w                                                     io.Writer
+	quiet, noTrunc, digestsFlag, namesFlag, newView, tree bool
+	inUse                                                 map[digest.Digest]int64 // image target -> number of containers referencing it
+	inUseByPlatform                                       map[platformRef]bool    // image target + platform -> run by at least one container
+	tmpl                                                  *template.Template
+	client                                                *containerd.Client
+	provider                                              content.Provider
+	snapshotter                                           snapshots.Snapshotter
 }
 
 type image struct {
@@ -241,6 +308,13 @@ type image struct {
 	size     int64
 	platform platforms.Platform
 	config   *ocispec.Descriptor
+	// manifestDigest is the digest of the platform-specific manifest itself, used as the per-platform
+	// ID in the tree view. For a single-platform image it is the image target digest.
+	manifestDigest digest.Digest
+	// available reports whether the content of that platform is in the store. An index lists every
+	// platform of the image, including the ones that were never pulled; only the tree view reports
+	// those, with zero sizes, the way docker does.
+	available bool
 }
 
 func readManifest(ctx context.Context, provider content.Provider, snapshotter snapshots.Snapshotter, desc ocispec.Descriptor) (*image, error) {
@@ -288,10 +362,12 @@ func readManifest(ctx context.Context, provider content.Provider, snapshotter sn
 	}
 
 	return &image{
-		blobSize: blobSize,
-		size:     size,
-		platform: plt,
-		config:   &manifest.Config,
+		blobSize:       blobSize,
+		size:           size,
+		platform:       plt,
+		config:         &manifest.Config,
+		manifestDigest: desc.Digest,
+		available:      true,
 	}, nil
 }
 
@@ -312,9 +388,26 @@ func readIndex(ctx context.Context, provider content.Provider, snapshotter snaps
 
 	// Iterate over manifest descriptors and read them all
 	for _, manifestDescriptor := range index.Manifests {
+		if isAttestationManifestDescriptor(manifestDescriptor) {
+			continue
+		}
+
 		manifest, err := readManifest(ctx, provider, snapshotter, manifestDescriptor)
 		if err != nil {
-			continue
+			// The index lists that platform, but its content is not in the store. Keep it as an
+			// unavailable entry: docker's tree lists those too, with zero sizes. Without a platform
+			// to name it by there is nothing to report, so drop it.
+			if manifestDescriptor.Platform == nil {
+				continue
+			}
+			manifest = &image{manifestDigest: manifestDescriptor.Digest}
+		}
+		// Prefer the platform declared by the index: it is the authoritative selector, while the
+		// image config may be less specific. Alpine, for instance, ships linux/arm/v6 and
+		// linux/arm/v7 manifests whose configs both say a bare "linux/arm", which normalizes to
+		// linux/arm/v7 and would collapse the two onto a single key, dropping one of them.
+		if manifestDescriptor.Platform != nil {
+			manifest.platform = platforms.Normalize(*manifestDescriptor.Platform)
 		}
 		descs[platforms.FormatAll(manifest.platform)] = manifest
 	}
@@ -343,7 +436,20 @@ func (x *imagePrinter) printImage(ctx context.Context, img images.Image) error {
 		return err
 	}
 
+	if x.tree {
+		return x.printImageTree(img, candidateImages)
+	}
+
+	if x.newView {
+		return x.printImageCollapsed(img, candidateImages)
+	}
+
 	for platform, desc := range candidateImages {
+		// The legacy table describes what is in the store, so leave out the platforms the index
+		// mentions but that were never pulled (they also carry no config to describe).
+		if !desc.available {
+			continue
+		}
 		if err := x.printImageSinglePlatform(*desc.config, img, desc.blobSize, desc.size, desc.platform); err != nil {
 			log.G(ctx).WithError(err).Debugf("failed to get platform %q of image %q", platform, img.Name)
 		}
@@ -418,4 +524,302 @@ func (x *imagePrinter) printImageSinglePlatform(desc ocispec.Descriptor, img ima
 		}
 	}
 	return nil
+}
+
+// printImageCollapsed renders a single row in the Docker v29 default view (IMAGE, ID, DISK USAGE,
+// CONTENT SIZE, EXTRA), aggregating disk and content size across the platforms present in the
+// content store.
+func (x *imagePrinter) printImageCollapsed(img images.Image, candidateImages map[string]*image) error {
+	var totalSnapshotSize, totalContentSize int64
+	for _, candidate := range candidateImages {
+		totalSnapshotSize += candidate.size
+		totalContentSize += candidate.blobSize
+	}
+
+	// Match Docker's tree view semantics (api/types/image.ManifestSummary.Size):
+	// CONTENT SIZE is the content-store blobs, and DISK USAGE ("Total") is the content plus the
+	// unpacked snapshots. Docker formats both with 3-significant-digit precision.
+	diskUsage := units.HumanSizeWithPrecision(float64(totalContentSize+totalSnapshotSize), 3)
+	contentSize := units.HumanSizeWithPrecision(float64(totalContentSize), 3)
+
+	extra := ""
+	if x.inUse[img.Target.Digest] > 0 {
+		extra = "U"
+	}
+
+	_, err := fmt.Fprintf(x.w, "%s\t%s\t%s\t%s\t%s\n",
+		newViewImageRef(img.Name),
+		shortImageID(img.Target.Digest),
+		diskUsage,
+		contentSize,
+		extra,
+	)
+	return err
+}
+
+// Tree branch prefixes for the per-platform rows, matching docker/cli's tree view.
+const (
+	treeBranch     = "├─ "
+	treeBranchLast = "└─ "
+)
+
+// printImageTree renders `nerdctl images --tree` for one image: the collapsed row, followed by one
+// row per platform present in the content store.
+//
+// Unlike docker/cli, which computes its column widths itself and can afford a blank line between
+// images, the rows here go through a tabwriter shared with the header: a blank line would terminate
+// its column block and misalign every following group, so the groups are separated by the branch
+// glyphs alone.
+func (x *imagePrinter) printImageTree(img images.Image, candidateImages map[string]*image) error {
+	if err := x.printImageCollapsed(img, candidateImages); err != nil {
+		return err
+	}
+
+	children := make([]*image, 0, len(candidateImages))
+	for _, candidate := range candidateImages {
+		children = append(children, candidate)
+	}
+	// The candidates come from a map, so they have to be ordered. Sorting on the full form rather
+	// than on the displayed one keeps that order stable even for the platforms that render
+	// identically, such as two windows/amd64 manifests differing only by OSVersion.
+	slices.SortFunc(children, func(a, b *image) int {
+		return strings.Compare(platforms.FormatAll(a.platform), platforms.FormatAll(b.platform))
+	})
+
+	for i, child := range children {
+		branch := treeBranch
+		if i == len(children)-1 {
+			branch = treeBranchLast
+		}
+		// The displayed name drops the OSVersion, so it cannot serve as identity: an index may
+		// carry several windows/amd64 manifests that differ only by it. Match on the full form.
+		platform := platforms.Format(child.platform)
+		extra := ""
+		if x.inUseByPlatform[platformRef{img.Target.Digest, platforms.FormatAll(child.platform)}] {
+			extra = "U"
+		}
+		// Same size semantics as the collapsed row, for this platform alone.
+		if _, err := fmt.Fprintf(x.w, "%s%s\t%s\t%s\t%s\t%s\n",
+			branch,
+			platform,
+			shortImageID(child.manifestDigest),
+			units.HumanSizeWithPrecision(float64(child.blobSize+child.size), 3),
+			units.HumanSizeWithPrecision(float64(child.blobSize), 3),
+			extra,
+		); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// shortImageID renders a digest the way the Docker v29 views do: the hex part, truncated to 12
+// characters. Those views never coexist with --no-trunc, so the ID is always truncated.
+func shortImageID(dgst digest.Digest) string {
+	id := dgst.String()
+	if _, hex, ok := strings.Cut(id, ":"); ok && len(hex) >= 12 {
+		return hex[:12]
+	}
+	return id
+}
+
+// printImagesLegend writes the right-aligned "In Use" legend for the Docker v29 default view.
+// Matching Docker, it is only emitted when the output is a terminal with a known width, so it
+// never pollutes piped or redirected output.
+func printImagesLegend(w io.Writer) {
+	f, ok := w.(*os.File)
+	if !ok {
+		return
+	}
+	width, _, err := term.GetSize(int(f.Fd()))
+	if err != nil || width <= 0 {
+		return
+	}
+	legend := "i Info →   U  In Use"
+	if pad := width - utf8.RuneCountInString(legend); pad > 0 {
+		legend = strings.Repeat(" ", pad) + legend
+	}
+	fmt.Fprintln(w, legend)
+}
+
+// untaggedImageRef is what the Docker v29 view shows in the IMAGE column for dangling images.
+const untaggedImageRef = "<untagged>"
+
+// sortByImageRef orders the images the way Docker v29 orders its collapsed view: lexicographically
+// by the rendered IMAGE column, with untagged images last. The legacy table keeps its own
+// creation-time ordering, so this is only applied to the new view.
+func sortByImageRef(imageList []images.Image) {
+	refs := make(map[string]string, len(imageList))
+	for _, img := range imageList {
+		refs[img.Name] = newViewImageRef(img.Name)
+	}
+	sort.SliceStable(imageList, func(i, j int) bool {
+		a, b := refs[imageList[i].Name], refs[imageList[j].Name]
+		if (a == untaggedImageRef) != (b == untaggedImageRef) {
+			return b == untaggedImageRef
+		}
+		return a < b
+	})
+}
+
+// newViewImageRef builds the IMAGE column for the Docker v29 default view: "repo:tag" for tagged
+// images, "repo@digest" for images pulled by digest, or "<untagged>" for dangling images.
+func newViewImageRef(name string) string {
+	parsed, err := referenceutil.Parse(name)
+	if err != nil {
+		return untaggedImageRef
+	}
+	familiar := parsed.FamiliarName()
+	if familiar == "" {
+		return untaggedImageRef
+	}
+	if parsed.Tag != "" {
+		return familiar + ":" + parsed.Tag
+	}
+	// A tag-less reference is shown as "repo@digest" only when it carries an explicit registry
+	// domain (a real pulled-by-digest image). Dangling build artifacts have a synthetic,
+	// domain-less name (e.g. "<none>@sha256:..." or "<snapshotter>@sha256:..." depending on the
+	// builder) and are rendered as "<untagged>", matching Docker.
+	if parsed.Digest != "" && referenceHasDomain(name) {
+		return familiar + "@" + parsed.Digest.String()
+	}
+	return untaggedImageRef
+}
+
+// referenceHasDomain reports whether the raw image reference includes an explicit registry
+// domain, using the same heuristic as distribution/reference: the component before the first
+// "/" is a domain when it is "localhost" or contains a "." or ":".
+func referenceHasDomain(name string) bool {
+	host, _, ok := strings.Cut(name, "/")
+	if !ok {
+		return false
+	}
+	return host == "localhost" || strings.ContainsAny(host, ".:")
+}
+
+// platformRef identifies a single platform of a single image, used to flag the exact manifest a
+// container runs in the tree view.
+type platformRef struct {
+	target digest.Digest
+	// platform is in platforms.FormatAll form: the identity of a platform, unlike the name the
+	// tree displays, has to keep the OSVersion.
+	platform string
+}
+
+// imagesInUse returns, per image target digest, the number of containers (in any state) referencing
+// it. It is used to render the Docker v29 "In Use" (U) indicator and the CONTAINERS column of
+// `nerdctl system df --verbose`. Docker matches containers to images by digest, so every name
+// pointing at the same target is counted, not just the one the container was created from.
+//
+// The second return value narrows this down to the platform each container actually runs, for the
+// per-platform rows of the tree view. Both are collected in a single container scan.
+//
+// A failure to scan the containers is returned rather than absorbed here, because the callers do
+// not agree on what it means: the listing merely loses a column, while the disk usage accounting
+// would report every image as inactive and all of its bytes as reclaimable.
+func imagesInUse(ctx context.Context, client *containerd.Client) (map[digest.Digest]int64, map[platformRef]bool, error) {
+	inUse := map[digest.Digest]int64{}
+	inUseByPlatform := map[platformRef]bool{}
+	containerList, err := client.Containers(ctx)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to list containers for image in-use detection: %w", err)
+	}
+	for _, container := range containerList {
+		dgst, ok, err := containerImageDigest(ctx, container)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to resolve the image of container %q: %w", container.ID(), err)
+		}
+		if !ok {
+			continue
+		}
+		inUse[dgst]++
+		inUseByPlatform[platformRef{dgst, containerPlatform(ctx, container)}] = true
+	}
+	return inUse, inUseByPlatform, nil
+}
+
+// containerPlatform reports the platform a container runs. Containers created outside nerdctl
+// (e.g. by ctr or the CRI plugin) carry no platform label; assume the default platform for those,
+// as pkg/imgutil/commit and `nerdctl container diff` already do.
+func containerPlatform(ctx context.Context, container containerd.Container) string {
+	platform := ""
+	// The already-loaded metadata carries the labels, so this costs no extra round trip.
+	if info, err := container.Info(ctx, containerd.WithoutRefreshedMetadata); err == nil {
+		platform = info.Labels[labels.Platform]
+	}
+	if platform == "" {
+		platform = platforms.DefaultString()
+	}
+	return normalizePlatform(platform)
+}
+
+// normalizePlatform renders a platform string in the full form the manifest platforms are keyed by,
+// so that the two can be compared.
+//
+// It keeps the OSVersion, which is what tells two otherwise identical windows/amd64 manifests
+// apart, and normalizes the rest: platforms.DefaultString does not normalize, so on arm64 the
+// label can carry a "v8"/"8" variant while the manifest platform normalizes to a bare
+// "linux/arm64", and a raw comparison would never match.
+func normalizePlatform(platform string) string {
+	parsed, err := platforms.Parse(platform)
+	if err != nil {
+		return platform
+	}
+	return platforms.FormatAll(platforms.Normalize(parsed))
+}
+
+// containerImageDigest returns the image target a container was created from.
+//
+// The digest is read from the label nerdctl records at creation time. Resolving the image name
+// instead would follow the tag wherever it points now: after `nerdctl tag` moves a tag onto another
+// image, the container would be attributed to an image it never ran. Containers created before this
+// label existed, or outside nerdctl, still have to be resolved by name.
+//
+// Resolving to no image is reported as such, without an error: a container removed while we list
+// it, one created from no image at all, and one whose image is gone all point at an image the
+// report does not cover anyway. Any other failure is returned, because a container silently dropped
+// here is an image wrongly reported as unused, and its bytes as reclaimable.
+func containerImageDigest(ctx context.Context, container containerd.Container) (digest.Digest, bool, error) {
+	// The already-loaded metadata carries the labels, so this costs no extra round trip.
+	info, err := container.Info(ctx, containerd.WithoutRefreshedMetadata)
+	if err != nil {
+		if errdefs.IsNotFound(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	if dgst, ok := PinnedImageDigest(info.Labels); ok {
+		return dgst, true, nil
+	}
+
+	image, err := container.Image(ctx)
+	if err != nil {
+		if errdefs.IsNotFound(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	return image.Target().Digest, true, nil
+}
+
+// PinnedImageDigest returns the image target digest a container pinned at creation time. An
+// unparsable value is treated as absent, so that a hand-edited label degrades to resolving the
+// image by name rather than dropping the container from the in-use set.
+func PinnedImageDigest(containerLabels map[string]string) (digest.Digest, bool) {
+	value := containerLabels[labels.ImageDigest]
+	if value == "" {
+		return "", false
+	}
+	dgst, err := digest.Parse(value)
+	if err != nil {
+		log.L.Debugf("ignoring invalid %s label value %q", labels.ImageDigest, value)
+		return "", false
+	}
+	return dgst, true
+}
+
+func isAttestationManifestDescriptor(desc ocispec.Descriptor) bool {
+	const manifestReferenceType = "vnd.docker.reference.type"
+	const attestationManifest = "attestation-manifest"
+	return desc.Annotations[manifestReferenceType] == attestationManifest
 }

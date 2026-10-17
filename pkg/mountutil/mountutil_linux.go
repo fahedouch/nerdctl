@@ -21,6 +21,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -28,6 +29,7 @@ import (
 	"github.com/docker/go-units"
 	mobymount "github.com/moby/sys/mount"
 	"github.com/opencontainers/runtime-spec/specs-go"
+	"github.com/opencontainers/selinux/go-selinux/label"
 	"golang.org/x/sys/unix"
 
 	"github.com/containerd/containerd/v2/core/containers"
@@ -36,6 +38,8 @@ import (
 	"github.com/containerd/log"
 
 	"github.com/containerd/nerdctl/v2/pkg/mountutil/volumestore"
+	"github.com/containerd/nerdctl/v2/pkg/ociruntimeutil"
+	"github.com/containerd/nerdctl/v2/pkg/strutil"
 )
 
 /*
@@ -89,10 +93,56 @@ func UnprivilegedMountFlags(path string) ([]string, error) {
 	return flags, nil
 }
 
+// supportsRecursivelyReadOnly is replaced in unit tests.
+var supportsRecursivelyReadOnly = ociruntimeutil.SupportsRecursivelyReadOnly
+
+// readOnlyMode is the read-only mode of a mount.
+// The modes correspond to the BindOptions of the Docker API >= v1.44.
+// https://github.com/moby/moby/pull/45278
+type readOnlyMode int
+
+const (
+	// readOnlyModeRecursiveIfPossible makes the mount recursively read-only when
+	// the kernel and the OCI runtime support the "rro" mount option, and falls
+	// back to the plain (non-recursive) read-only otherwise.
+	// This is the default mode of read-only mounts since Docker v25.
+	readOnlyModeRecursiveIfPossible readOnlyMode = iota
+	// readOnlyModeNonRecursive makes the mount read-only, but keeps its submounts
+	// writable. This was the default mode of read-only mounts until Docker v24.
+	// Corresponds to `--mount type=bind,readonly,bind-recursive=writable`.
+	readOnlyModeNonRecursive
+	// readOnlyModeForceRecursive makes the mount recursively read-only, or
+	// raises an error when the kernel or the OCI runtime does not support "rro".
+	// Corresponds to `--mount type=bind,readonly,bind-recursive=readonly`.
+	readOnlyModeForceRecursive
+)
+
+// readOnlyMountOptions returns the mount options for the given read-only mode.
+// Whether the OCI runtime supports the "rro" mount option is detected by running
+// `$RUNTIME features`; ociRuntime is the value of the `--runtime` flag.
+func readOnlyMountOptions(mode readOnlyMode, ociRuntime string) ([]string, error) {
+	switch mode {
+	case readOnlyModeRecursiveIfPossible:
+		if err := supportsRecursivelyReadOnly(ociRuntime); err != nil {
+			log.L.WithError(err).Debug("recursive read-only mounts are not supported, falling back to non-recursive read-only")
+			return []string{"ro"}, nil
+		}
+		return []string{"rro"}, nil
+	case readOnlyModeNonRecursive:
+		return []string{"ro"}, nil
+	case readOnlyModeForceRecursive:
+		if err := supportsRecursivelyReadOnly(ociRuntime); err != nil {
+			return nil, err
+		}
+		return []string{"rro"}, nil
+	}
+	return nil, fmt.Errorf("unexpected read-only mode %v", mode)
+}
+
 // parseVolumeOptions parses specified optsRaw with using information of
 // the volume type and the src directory when necessary.
-func parseVolumeOptions(vType, src, optsRaw string) ([]string, []oci.SpecOpts, error) {
-	return parseVolumeOptionsWithMountInfo(vType, src, optsRaw, getMountInfo)
+func parseVolumeOptions(vType, src, optsRaw, ociRuntime string) ([]string, []oci.SpecOpts, error) {
+	return parseVolumeOptionsWithMountInfo(vType, src, optsRaw, ociRuntime, getMountInfo)
 }
 
 // getMountInfo gets mount.Info of a directory.
@@ -106,12 +156,13 @@ func getMountInfo(dir string) (mount.Info, error) {
 
 // parseVolumeOptionsWithMountInfo is the testable implementation
 // of parseVolumeOptions.
-func parseVolumeOptionsWithMountInfo(vType, src, optsRaw string, getMountInfoFunc func(string) (mount.Info, error)) ([]string, []oci.SpecOpts, error) {
+func parseVolumeOptionsWithMountInfo(vType, src, optsRaw, ociRuntime string, getMountInfoFunc func(string) (mount.Info, error)) ([]string, []oci.SpecOpts, error) {
 	var (
 		writeModeRawOpts   []string
 		propagationRawOpts []string
 		bindOpts           []string
 	)
+	var specOpts []oci.SpecOpts
 	for _, opt := range strings.Split(optsRaw, ",") {
 		switch opt {
 		case "rw", "ro", "rro":
@@ -121,6 +172,15 @@ func parseVolumeOptionsWithMountInfo(vType, src, optsRaw string, getMountInfoFun
 		case "bind", "rbind":
 			// bind means not recursively bind-mounted, rbind is the opposite
 			bindOpts = append(bindOpts, opt)
+		case "Z", "z":
+			specOpts = append(specOpts, func(ctx context.Context, cli oci.Client, c *containers.Container, s *oci.Spec) error {
+				if s.Linux != nil && s.Linux.MountLabel != "" {
+					if err := label.Relabel(src, s.Linux.MountLabel, opt == "z"); err != nil {
+						return err
+					}
+				}
+				return nil
+			})
 		case "":
 			// NOP
 		default:
@@ -129,7 +189,6 @@ func parseVolumeOptionsWithMountInfo(vType, src, optsRaw string, getMountInfoFun
 	}
 
 	var opts []string
-	var specOpts []oci.SpecOpts
 
 	if len(bindOpts) > 0 && vType != Bind {
 		return nil, nil, fmt.Errorf("volume bind/rbind option is only supported for bind mount: %+v", bindOpts)
@@ -144,14 +203,25 @@ func parseVolumeOptionsWithMountInfo(vType, src, optsRaw string, getMountInfoFun
 	} else if len(writeModeRawOpts) > 0 {
 		switch writeModeRawOpts[0] {
 		case "ro":
-			opts = append(opts, "ro")
+			// Docker (since v25) attempts to make the mount recursively read-only.
+			// https://github.com/moby/moby/pull/45278
+			roOpts, err := readOnlyMountOptions(readOnlyModeRecursiveIfPossible, ociRuntime)
+			if err != nil {
+				return nil, nil, err
+			}
+			opts = append(opts, roOpts...)
 		case "rro":
-			// Mount option "rro" is supported since crun v1.4 / runc v1.1 (https://github.com/opencontainers/runc/pull/3272), with kernel >= 5.12.
-			// Older version of runc just ignores "rro", so we have to add "ro" too, to our best effort.
-			opts = append(opts, "ro", "rro")
+			// "rro" was introduced in nerdctl v0.14 (2021), ahead of Docker.
+			// Docker v25 introduced `--mount type=bind,...,readonly,bind-recursive=readonly` instead.
+			log.L.Warn("The volume option \"rro\" is deprecated; use `--mount type=bind,src=...,dst=...,readonly,bind-propagation=rprivate,bind-recursive=readonly` instead")
 			if len(propagationRawOpts) != 1 || propagationRawOpts[0] != "rprivate" {
 				log.L.Warn("Mount option \"rro\" should be used in conjunction with \"rprivate\"")
 			}
+			roOpts, err := readOnlyMountOptions(readOnlyModeForceRecursive, ociRuntime)
+			if err != nil {
+				return nil, nil, err
+			}
+			opts = append(opts, roOpts...)
 		case "rw":
 			// NOP
 		default:
@@ -291,7 +361,30 @@ func ProcessFlagTmpfs(s string) (*Processed, error) {
 	return res, nil
 }
 
-func ProcessFlagMount(s string, volStore volumestore.VolumeStore) (*Processed, error) {
+// validateImageSubpath normalizes an image-subpath, rejecting absolute paths and
+// ones escaping the rootfs. A value resolving to the rootfs itself returns empty,
+// the whole-rootfs case Docker accepts. Image paths are always forward-slash.
+func validateImageSubpath(p string) (string, error) {
+	if p == "" {
+		return "", nil
+	}
+	if path.IsAbs(p) {
+		return "", fmt.Errorf("image-subpath must be relative to the image rootfs, got %q", p)
+	}
+	clean := path.Clean(p)
+	// Clean collapses ".." segments; anything still leading with ".." escapes root.
+	if clean == ".." || strings.HasPrefix(clean, "../") {
+		return "", fmt.Errorf("image-subpath %q escapes the image rootfs", p)
+	}
+	// "." is the whole rootfs (e.g. from "a/.."); treat it as no subpath so the
+	// caller mounts the full image view, matching Docker.
+	if clean == "." {
+		return "", nil
+	}
+	return clean, nil
+}
+
+func ProcessFlagMount(s string, volStore volumestore.VolumeStore, ociRuntime string) (*Processed, error) {
 	fields := strings.Split(s, ",")
 	var (
 		mountType        string
@@ -299,7 +392,11 @@ func ProcessFlagMount(s string, volStore volumestore.VolumeStore) (*Processed, e
 		dst              string
 		bindPropagation  string
 		bindNonRecursive bool
+		bindRecursive    string // "enabled", "disabled", "writable", or "readonly"
+		volumeNoCopy     bool
 		rwOption         string
+		imageSubpath     string
+		imageSubpathSet  bool
 		tmpfsSize        int64
 		tmpfsMode        os.FileMode
 		err              error
@@ -322,11 +419,20 @@ func ProcessFlagMount(s string, volStore volumestore.VolumeStore) (*Processed, e
 
 		if len(parts) == 1 {
 			switch key {
-			case "readonly", "ro", "rw", "rro":
+			case "readonly", "ro":
+				rwOption = key
+				continue
+			case "rro":
+				log.L.Warn("The mount option \"rro\" is deprecated; use \"readonly\" with \"bind-propagation=rprivate\" and \"bind-recursive=readonly\" instead")
 				rwOption = key
 				continue
 			case "bind-nonrecursive":
+				// Removed in Docker v29, in favor of `bind-recursive=disabled` https://github.com/docker/cli/pull/6241
+				log.L.Warn("The mount option \"bind-nonrecursive\" is deprecated; use \"bind-recursive=disabled\" instead")
 				bindNonRecursive = true
+				continue
+			case "volume-nocopy":
+				volumeNoCopy = true
 				continue
 			}
 		}
@@ -343,30 +449,57 @@ func ProcessFlagMount(s string, volStore volumestore.VolumeStore) (*Processed, e
 				mountType = Tmpfs
 			case "bind":
 				mountType = Bind
+			case "image":
+				mountType = Image
 			case "volume":
 			default:
-				return nil, fmt.Errorf("invalid mount type '%s' must be a volume/bind/tmpfs", value)
+				return nil, fmt.Errorf("invalid mount type '%s' must be a volume/bind/tmpfs/image", value)
 			}
 		case "source", "src":
 			src = value
 		case "target", "dst", "destination":
 			dst = value
-		case "readonly", "ro", "rw", "rro":
+		case "readonly", "ro", "rro":
 			trueValue, err := strconv.ParseBool(value)
 			if err != nil {
 				return nil, fmt.Errorf("invalid value for %s: %s", key, value)
 			}
+			if key == "rro" {
+				log.L.Warn("The mount option \"rro\" is deprecated; use \"readonly\" with \"bind-propagation=rprivate\" and \"bind-recursive=readonly\" instead")
+			}
 			if trueValue {
 				rwOption = key
 			}
+		case "image-subpath":
+			// Selects a directory inside a type=image rootfs; validated below once
+			// the mount type is known. Presence is tracked separately from the
+			// value so that an explicit empty value is not read as "unset".
+			imageSubpath = value
+			imageSubpathSet = true
 		case "bind-propagation":
 			// here don't validate the propagation value
 			// parseVolumeOptions will do that.
 			bindPropagation = value
 		case "bind-nonrecursive":
+			// Removed in Docker v29, in favor of `bind-recursive=disabled` https://github.com/docker/cli/pull/6241
+			log.L.Warn("The mount option \"bind-nonrecursive\" is deprecated; use \"bind-recursive=disabled\" instead")
 			bindNonRecursive, err = strconv.ParseBool(value)
 			if err != nil {
 				return nil, fmt.Errorf("invalid value for %s: %s", key, value)
+			}
+		case "volume-nocopy":
+			volumeNoCopy, err = strconv.ParseBool(value)
+			if err != nil {
+				return nil, fmt.Errorf("invalid value for %s: %s", key, value)
+			}
+		case "bind-recursive":
+			// bind-recursive is the Docker (v25) option that supersedes bind-nonrecursive.
+			// https://github.com/docker/cli/pull/4316
+			switch value {
+			case "enabled", "disabled", "writable", "readonly":
+				bindRecursive = value
+			default:
+				return nil, fmt.Errorf("invalid value for %s: %s (must be \"enabled\", \"disabled\", \"writable\", or \"readonly\")", key, value)
 			}
 		case "tmpfs-size":
 			tmpfsSize, err = units.RAMInBytes(value)
@@ -384,20 +517,102 @@ func ProcessFlagMount(s string, volStore volumestore.VolumeStore) (*Processed, e
 		}
 	}
 
+	if volumeNoCopy && mountType != Volume {
+		return nil, fmt.Errorf("the option 'volume-nocopy' is only supported for volume mounts")
+	}
+
+	// Check presence, not value: an explicit empty image-subpath is an error on
+	// every type, and on other types the option itself is rejected before falling
+	// through to the legacy bind/volume/tmpfs handlers. Both match Docker.
+	if imageSubpathSet {
+		if imageSubpath == "" {
+			return nil, fmt.Errorf("invalid value for image-subpath: value is empty")
+		}
+		if mountType != Image {
+			return nil, fmt.Errorf("image-subpath is only supported for type=image")
+		}
+	}
+
+	// type=image's source is an image reference resolved later with a containerd
+	// client; validate the intent here. Like Docker, an image mount is always
+	// read-only: a readonly/ro option is accepted for compatibility but the
+	// mount is read-only regardless of its value.
+	if mountType == Image {
+		if src == "" {
+			return nil, fmt.Errorf("type=image requires a source (the image reference)")
+		}
+		if dst == "" {
+			return nil, fmt.Errorf("type=image requires a destination")
+		}
+		// Bound the subpath at parse time; symlinks are checked once the rootfs
+		// is materialized.
+		cleanSubpath, err := validateImageSubpath(imageSubpath)
+		if err != nil {
+			return nil, err
+		}
+		return &Processed{
+			Type: Image,
+			// Mode "ro" so inspect/label metadata reports the mount read-only.
+			Mode: "ro",
+			Mount: specs.Mount{
+				Type:        Image,
+				Source:      src,
+				Destination: cleanMount(dst),
+			},
+			ImageSubpath: cleanSubpath,
+		}, nil
+	}
+
+	// Resolve the read-only mode of the mount, for Docker (v25) compatibility.
+	// https://github.com/docker/cli/pull/4316
+	roMode := readOnlyModeRecursiveIfPossible
+	if rwOption == "rro" {
+		// Deprecated form: force RRO, like `bind-recursive=readonly` (but the
+		// propagation is not validated, for compatibility with older nerdctl).
+		roMode = readOnlyModeForceRecursive
+		if bindPropagation != "rprivate" {
+			log.L.Warn("Mount option \"rro\" should be used in conjunction with \"bind-propagation=rprivate\"")
+		}
+	}
+	if bindRecursive != "" {
+		if mountType != Bind {
+			return nil, fmt.Errorf("the option bind-recursive is only supported for bind mounts")
+		}
+		switch bindRecursive {
+		case "enabled":
+			bindNonRecursive = false
+		case "disabled":
+			bindNonRecursive = true
+		case "writable":
+			if rwOption == "" {
+				return nil, fmt.Errorf("the option 'bind-recursive=writable' requires 'readonly' to be specified in conjunction")
+			}
+			roMode = readOnlyModeNonRecursive
+		case "readonly":
+			if rwOption == "" {
+				return nil, fmt.Errorf("the option 'bind-recursive=readonly' requires 'readonly' to be specified in conjunction")
+			}
+			if bindPropagation != "rprivate" {
+				return nil, fmt.Errorf("the option 'bind-recursive=readonly' requires 'bind-propagation=rprivate' to be specified in conjunction")
+			}
+			if bindNonRecursive {
+				return nil, fmt.Errorf("the option 'bind-recursive=readonly' conflicts with 'bind-nonrecursive'")
+			}
+			roMode = readOnlyModeForceRecursive
+		}
+	}
+
 	// compose new fileds and join into a string
 	// to call legacy ProcessFlagTmpfs or ProcessFlagV function
 	fields = []string{}
 	options := []string{}
-	if rwOption != "" {
-		if rwOption == "readonly" {
-			rwOption = "ro"
-		}
-		options = append(options, rwOption)
-	}
 
 	switch mountType {
 	case Tmpfs:
 		fields = []string{dst}
+		if rwOption != "" {
+			options = append(options, "ro")
+		}
 		if tmpfsMode != 0 {
 			options = append(options, fmt.Sprintf("mode=%o", tmpfsMode))
 		}
@@ -405,6 +620,9 @@ func ProcessFlagMount(s string, volStore volumestore.VolumeStore) (*Processed, e
 			options = append(options, getTmpfsSize(tmpfsSize))
 		}
 	case Volume, Bind:
+		// The read-only option is not composed here; it is applied to the
+		// processed mount below, as the legacy volume option syntax cannot
+		// express all the read-only modes.
 		fields = []string{src, dst}
 		if bindPropagation != "" {
 			options = append(options, bindPropagation)
@@ -431,7 +649,20 @@ func ProcessFlagMount(s string, volStore volumestore.VolumeStore) (*Processed, e
 		return ProcessFlagTmpfs(fieldsStr)
 	case Volume, Bind:
 		// createDir=false for --mount option to disallow creating directories on host if not found
-		return ProcessFlagV(fieldsStr, volStore, false)
+		res, err := ProcessFlagV(fieldsStr, volStore, false, ociRuntime)
+		if err != nil {
+			return nil, err
+		}
+		res.VolumeNoCopy = volumeNoCopy
+		if rwOption != "" {
+			roOpts, err := readOnlyMountOptions(roMode, ociRuntime)
+			if err != nil {
+				return nil, err
+			}
+			res.Mount.Options = strutil.DedupeStrSlice(append(res.Mount.Options, roOpts...))
+			res.Mode = strings.Join(res.Mount.Options, ",")
+		}
+		return res, nil
 	}
 	return nil, fmt.Errorf("invalid mount type '%s' must be a volume/bind/tmpfs", mountType)
 }

@@ -54,6 +54,8 @@ func Command() *cobra.Command {
 		pruneCommand(),
 		StatsCommand(),
 		AttachCommand(),
+		HealthCheckCommand(),
+		ExportCommand(),
 	)
 	AddCpCommand(cmd)
 	return cmd

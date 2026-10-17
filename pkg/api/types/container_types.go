@@ -32,6 +32,14 @@ type ContainerStartOptions struct {
 	DetachKeys string
 	// Attach stdin
 	Interactive bool
+	// Checkpoint is the name of the checkpoint to restore
+	Checkpoint string
+	// CheckpointDir is the directory to store checkpoints
+	CheckpointDir string
+	// NerdctlCmd is the command name of nerdctl
+	NerdctlCmd string
+	// NerdctlArgs is the arguments of nerdctl
+	NerdctlArgs []string
 }
 
 // ContainerKillOptions specifies options for `nerdctl (container) kill`.
@@ -42,6 +50,13 @@ type ContainerKillOptions struct {
 	GOptions GlobalCommandOptions
 	// KillSignal is the signal to send to the container
 	KillSignal string
+}
+
+// ContainerExportOptions specifies options for `nerdctl (container) export`.
+type ContainerExportOptions struct {
+	Stdout io.Writer
+	// GOptions is the global options
+	GOptions GlobalCommandOptions
 }
 
 // ContainerCreateOptions specifies options for `nerdctl (container) create` and `nerdctl (container) run`.
@@ -140,7 +155,7 @@ type ContainerCreateOptions struct {
 	OomKillDisable bool
 	// OomScoreAdjChanged specifies whether the OOM preferences has been changed
 	OomScoreAdjChanged bool
-	// OomScoreAdj specifies the tune container’s OOM preferences (-1000 to 1000, rootless: 100 to 1000)
+	// OomScoreAdj specifies the tune container's OOM preferences (-1000 to 1000, rootless: 100 to 1000)
 	OomScoreAdj int
 	// PidsLimit specifies the tune container pids limit
 	PidsLimit int64
@@ -237,8 +252,6 @@ type ContainerCreateOptions struct {
 	// #endregion
 
 	// #region for metadata flags
-	// NameChanged specifies whether the name has been changed
-	NameChanged bool
 	// Name assign a name to the container
 	Name string
 	// Label set meta data on a container
@@ -286,6 +299,14 @@ type ContainerCreateOptions struct {
 	// ImagePullOpt specifies image pull options which holds the ImageVerifyOptions for verifying the image.
 	ImagePullOpt ImagePullOptions
 
+	// Healthcheck related fields
+	HealthCmd         string
+	HealthInterval    time.Duration
+	HealthTimeout     time.Duration
+	HealthRetries     int
+	HealthStartPeriod time.Duration
+	NoHealthcheck     bool
+
 	// UserNS name for user namespace mapping of container
 	UserNS string
 }
@@ -312,6 +333,10 @@ type ContainerRestartOptions struct {
 	Timeout *time.Duration
 	// Signal to send to stop the container, before sending SIGKILL
 	Signal string
+	// NerdctlCmd is the command name of nerdctl
+	NerdctlCmd string
+	// NerdctlArgs is the arguments of nerdctl
+	NerdctlArgs []string
 }
 
 // ContainerPauseOptions specifies options for `nerdctl (container) pause`.
@@ -329,7 +354,14 @@ type ContainerPruneOptions struct {
 }
 
 // ContainerUnpauseOptions specifies options for `nerdctl (container) unpause`.
-type ContainerUnpauseOptions ContainerPauseOptions
+type ContainerUnpauseOptions struct {
+	Stdout   io.Writer
+	GOptions GlobalCommandOptions
+	// NerdctlCmd is the command name of nerdctl
+	NerdctlCmd string
+	// NerdctlArgs is the arguments of nerdctl
+	NerdctlArgs []string
+}
 
 // ContainerRemoveOptions specifies options for `nerdctl (container) rm`.
 type ContainerRemoveOptions struct {
@@ -385,7 +417,34 @@ type ContainerCommitOptions struct {
 	Change []string
 	// Pause container during commit
 	Pause bool
+	// Compression is set commit compression algorithm
+	Compression CompressionType
+	// Format specifies the image format for the committed image (docker or oci)
+	Format ImageFormat
+	// Timeout is the maximum duration for the commit operation (lease expiration).
+	// Defaults to 1 hour. Set to 0 for no timeout (24h lease).
+	Timeout time.Duration
+	// Embed EstargzOptions for eStargz conversion options
+	EstargzOptions
+	// Embed ZstdChunkedOptions for zstd:chunked conversion options
+	ZstdChunkedOptions
 }
+
+type CompressionType string
+
+const (
+	Zstd CompressionType = "zstd"
+	Gzip CompressionType = "gzip"
+)
+
+type ImageFormat string
+
+const (
+	// ImageFormatDocker uses Docker Schema2 media types for compatibility
+	ImageFormatDocker ImageFormat = "docker"
+	// ImageFormatOCI uses OCI Image Format media types
+	ImageFormatOCI ImageFormat = "oci"
+)
 
 // ContainerDiffOptions specifies options for `nerdctl (container) diff`.
 type ContainerDiffOptions struct {
@@ -485,6 +544,10 @@ type ContainerCpOptions struct {
 	SrcPath string
 	// Follow symbolic links in SRC_PATH
 	FollowSymLink bool
+	// true if copying to container from tarball in stdin
+	FromStdin bool
+	// true if copying from container to stdout in tarball format
+	ToStdout bool
 }
 
 // ContainerStatsOptions specifies options for `nerdctl stats`.

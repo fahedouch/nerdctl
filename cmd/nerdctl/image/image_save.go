@@ -17,11 +17,14 @@
 package image
 
 import (
+	"context"
 	"fmt"
 	"os"
 
 	"github.com/mattn/go-isatty"
 	"github.com/spf13/cobra"
+
+	"github.com/containerd/log"
 
 	"github.com/containerd/nerdctl/v2/cmd/nerdctl/completion"
 	"github.com/containerd/nerdctl/v2/cmd/nerdctl/helpers"
@@ -32,7 +35,7 @@ import (
 
 func SaveCommand() *cobra.Command {
 	var cmd = &cobra.Command{
-		Use:               "save",
+		Use:               "save [flags] IMAGE [IMAGE...]",
 		Args:              cobra.MinimumNArgs(1),
 		Short:             "Save one or more images to a tar archive (streamed to STDOUT by default)",
 		Long:              "The archive implements both Docker Image Spec v1.2 and OCI Image Spec v1.0.",
@@ -42,6 +45,7 @@ func SaveCommand() *cobra.Command {
 		SilenceErrors:     true,
 	}
 	cmd.Flags().StringP("output", "o", "", "Write to a file, instead of STDOUT")
+	cmd.Flags().BoolP("quiet", "q", false, "Suppress the progress output")
 
 	// #region platform flags
 	// platform is defined as StringSlice, not StringArray, to allow specifying "--platform=amd64,arm64"
@@ -67,11 +71,16 @@ func saveOptions(cmd *cobra.Command) (types.ImageSaveOptions, error) {
 	if err != nil {
 		return types.ImageSaveOptions{}, err
 	}
+	quiet, err := cmd.Flags().GetBool("quiet")
+	if err != nil {
+		return types.ImageSaveOptions{}, err
+	}
 
 	return types.ImageSaveOptions{
 		GOptions:     globalOptions,
 		AllPlatforms: allPlatforms,
 		Platform:     platform,
+		Quiet:        quiet,
 	}, err
 }
 
@@ -86,12 +95,22 @@ func saveAction(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	} else if outputPath != "" {
-		f, err := os.OpenFile(outputPath, os.O_CREATE|os.O_WRONLY, 0644)
+		// O_TRUNC: writing a smaller archive over a bigger one would otherwise leave the tail of
+		// the bigger one past its end. A tar reader stops at the end-of-archive marker and would
+		// not notice, but the file would carry the bytes of an unrelated image.
+		f, err := os.OpenFile(outputPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
 		if err != nil {
 			return err
 		}
 		output = f
-		defer f.Close()
+		defer func() {
+			if err := f.Sync(); err != nil {
+				f.Close()
+				log.G(context.Background()).Error(err)
+				return
+			}
+			f.Close()
+		}()
 	} else if out, ok := output.(*os.File); ok && isatty.IsTerminal(out.Fd()) {
 		return fmt.Errorf("cowardly refusing to save to a terminal. Use the -o flag or redirect")
 	}

@@ -54,7 +54,7 @@ func UnprivilegedMountFlags(path string) ([]string, error) {
 
 // parseVolumeOptions parses specified optsRaw with using information of
 // the volume type and the src directory when necessary.
-func parseVolumeOptions(vType, src, optsRaw string) ([]string, []oci.SpecOpts, error) {
+func parseVolumeOptions(vType, src, optsRaw, ociRuntime string) ([]string, []oci.SpecOpts, error) {
 	var writeModeRawOpts []string
 	for _, opt := range strings.Split(optsRaw, ",") {
 		switch opt {
@@ -81,7 +81,7 @@ func ProcessFlagTmpfs(s string) (*Processed, error) {
 	return nil, errdefs.ErrNotImplemented
 }
 
-func ProcessFlagMount(s string, volStore volumestore.VolumeStore) (*Processed, error) {
+func ProcessFlagMount(s string, volStore volumestore.VolumeStore, ociRuntime string) (*Processed, error) {
 	return nil, errdefs.ErrNotImplemented
 }
 
@@ -161,7 +161,18 @@ func cleanMount(p string) string {
 	return filepath.Clean(p)
 }
 
+func validateNotRoot(p string) error {
+	p = strings.ToLower(cleanMount(p))
+	if p == "c:" || p == `c:\` {
+		return fmt.Errorf(`destination path (%v) cannot be 'c:' or 'c:\'`, p)
+	}
+	return nil
+}
+
 func isValidPath(s string) (bool, error) {
+	if err := validateNotRoot(s); err != nil {
+		return false, err
+	}
 	if isNamedPipe(s) || filepath.IsAbs(s) {
 		return true, nil
 	}

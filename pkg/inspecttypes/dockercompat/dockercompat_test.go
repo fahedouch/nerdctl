@@ -22,15 +22,24 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/docker/go-connections/nat"
+	"github.com/docker/go-units"
+	"github.com/opencontainers/go-digest"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	"gotest.tools/v3/assert"
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/containers"
+	"github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/go-cni"
 
+	"github.com/containerd/nerdctl/v2/pkg/healthcheck"
 	"github.com/containerd/nerdctl/v2/pkg/inspecttypes/native"
+	"github.com/containerd/nerdctl/v2/pkg/internal/filesystem"
+	"github.com/containerd/nerdctl/v2/pkg/labels"
 )
 
 func TestContainerFromNative(t *testing.T) {
@@ -38,8 +47,18 @@ func TestContainerFromNative(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	os.WriteFile(filepath.Join(tempStateDir, "resolv.conf"), []byte(""), 0644)
+	filesystem.WriteFile(filepath.Join(tempStateDir, "resolv.conf"), []byte(""), 0644)
 	defer os.RemoveAll(tempStateDir)
+
+	hc := &healthcheck.Healthcheck{
+		Test:        []string{"CMD-SHELL", "curl -f http://localhost || exit 1"},
+		Interval:    time.Second * 30,
+		Timeout:     time.Second * 5,
+		Retries:     3,
+		StartPeriod: time.Second * 10,
+	}
+	hcJSON, err := hc.ToJSONString()
+	assert.NilError(t, err)
 
 	testcase := []struct {
 		name     string
@@ -52,15 +71,46 @@ func TestContainerFromNative(t *testing.T) {
 			n: &native.Container{
 				Container: containers.Container{
 					Labels: map[string]string{
-						"nerdctl/mounts":    "[{\"Type\":\"bind\",\"Source\":\"/mnt/foo\",\"Destination\":\"/mnt/foo\",\"Mode\":\"rshared,rw\",\"RW\":true,\"Propagation\":\"rshared\"}]",
-						"nerdctl/state-dir": tempStateDir,
-						"nerdctl/hostname":  "host1",
-						"nerdctl/user":      "test-user",
+						"nerdctl/mounts.0":             "{\"Type\":\"bind\",\"Source\":\"/mnt/foo\",\"Destination\":\"/mnt/foo\",\"Mode\":\"rshared,rw\",\"RW\":true,\"Propagation\":\"rshared\"}",
+						"nerdctl/state-dir":            tempStateDir,
+						"nerdctl/hostname":             "host1",
+						"nerdctl/user":                 "test-user",
+						"nerdctl/networks":             `["my-net"]`,
+						"nerdctl/privileged":           "true",
+						"nerdctl/auto-remove":          "true",
+						"containerd.io/restart.policy": "on-failure:3",
 					},
 				},
 				Spec: &specs.Spec{
 					Process: &specs.Process{
 						Env: []string{"/some/path"},
+						Capabilities: &specs.LinuxCapabilities{
+							Bounding: []string{
+								"CAP_CHOWN", "CAP_DAC_OVERRIDE", "CAP_FSETID", "CAP_FOWNER",
+								"CAP_MKNOD", "CAP_NET_RAW", "CAP_SETGID", "CAP_SETUID",
+								"CAP_SETFCAP", "CAP_SETPCAP", "CAP_NET_BIND_SERVICE",
+								"CAP_SYS_CHROOT", "CAP_KILL", "CAP_AUDIT_WRITE",
+								"CAP_NET_ADMIN",
+							},
+						},
+						Rlimits: []specs.POSIXRlimit{
+							{Type: "RLIMIT_NOFILE", Hard: 65536, Soft: 1024},
+						},
+					},
+					Linux: &specs.Linux{
+						Resources: &specs.LinuxResources{
+							Memory: &specs.LinuxMemory{
+								Reservation: func() *int64 { v := int64(209715200); return &v }(),
+								Swappiness:  func() *uint64 { v := uint64(60); return &v }(),
+							},
+							Pids: &specs.LinuxPids{
+								Limit: func() *int64 { v := int64(100); return &v }(),
+							},
+						},
+					},
+					Annotations: map[string]string{
+						"nerdctl/state-dir": tempStateDir,
+						"com.example.key":   "user-val",
 					},
 				},
 				Process: &native.Process{
@@ -87,9 +137,20 @@ func TestContainerFromNative(t *testing.T) {
 						Driver: "json-file",
 						Opts:   map[string]string{},
 					},
-					UTSMode:            "host",
-					Tmpfs:              map[string]string{},
-					LinuxBlkioSettings: getDefaultLinuxBlkioSettings(),
+					UTSMode:           "host",
+					Tmpfs:             map[string]string{},
+					BlkioSettings:     getDefaultBlkioSettings(),
+					NetworkMode:       "my-net",
+					Privileged:        true,
+					AutoRemove:        true,
+					RestartPolicy:     RestartPolicy{Name: "on-failure", MaximumRetryCount: 3},
+					CapAdd:            []string{"CAP_NET_ADMIN"},
+					CapDrop:           []string{},
+					Ulimits:           []*units.Ulimit{{Name: "nofile", Hard: 65536, Soft: 1024}},
+					MemoryReservation: 209715200,
+					MemorySwappiness:  func() *int64 { v := int64(60); return &v }(),
+					PidsLimit:         100,
+					Annotations:       map[string]string{"com.example.key": "user-val"},
 				},
 				Mounts: []MountPoint{
 					{
@@ -103,10 +164,14 @@ func TestContainerFromNative(t *testing.T) {
 				},
 				Config: &Config{
 					Labels: map[string]string{
-						"nerdctl/mounts":    "[{\"Type\":\"bind\",\"Source\":\"/mnt/foo\",\"Destination\":\"/mnt/foo\",\"Mode\":\"rshared,rw\",\"RW\":true,\"Propagation\":\"rshared\"}]",
-						"nerdctl/state-dir": tempStateDir,
-						"nerdctl/hostname":  "host1",
-						"nerdctl/user":      "test-user",
+						"nerdctl/mounts.0":             `{"Type":"bind","Source":"/mnt/foo","Destination":"/mnt/foo","Mode":"rshared,rw","RW":true,"Propagation":"rshared"}`,
+						"nerdctl/state-dir":            tempStateDir,
+						"nerdctl/hostname":             "host1",
+						"nerdctl/user":                 "test-user",
+						"nerdctl/networks":             `["my-net"]`,
+						"nerdctl/privileged":           "true",
+						"nerdctl/auto-remove":          "true",
+						"containerd.io/restart.policy": "on-failure:3",
 					},
 					Hostname: "host1",
 					Env:      []string{"/some/path"},
@@ -183,9 +248,9 @@ func TestContainerFromNative(t *testing.T) {
 						Driver: "json-file",
 						Opts:   map[string]string{},
 					},
-					UTSMode:            "host",
-					Tmpfs:              map[string]string{},
-					LinuxBlkioSettings: getDefaultLinuxBlkioSettings(),
+					UTSMode:       "host",
+					Tmpfs:         map[string]string{},
+					BlkioSettings: getDefaultBlkioSettings(),
 				},
 				Mounts: []MountPoint{
 					{
@@ -274,9 +339,9 @@ func TestContainerFromNative(t *testing.T) {
 						Driver: "json-file",
 						Opts:   map[string]string{},
 					},
-					UTSMode:            "host",
-					Tmpfs:              map[string]string{},
-					LinuxBlkioSettings: getDefaultLinuxBlkioSettings(),
+					UTSMode:       "host",
+					Tmpfs:         map[string]string{},
+					BlkioSettings: getDefaultBlkioSettings(),
 				},
 				Mounts: []MountPoint{
 					{
@@ -298,6 +363,51 @@ func TestContainerFromNative(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "container with healthcheck label",
+			n: &native.Container{
+				Container: containers.Container{
+					Labels: map[string]string{
+						labels.HealthCheck: hcJSON,
+					},
+				},
+				Spec: &specs.Spec{},
+				Process: &native.Process{
+					Status: containerd.Status{
+						Status: "running",
+					},
+				},
+			},
+			expected: &Container{
+				Created:  "0001-01-01T00:00:00Z",
+				Platform: runtime.GOOS,
+				Mounts:   []MountPoint{},
+				State: &ContainerState{
+					Status:     "running",
+					Running:    true,
+					Pid:        0,
+					FinishedAt: "",
+				},
+				HostConfig: &HostConfig{
+					LogConfig:     loggerLogConfig{Driver: "json-file", Opts: map[string]string{}},
+					PortBindings:  nat.PortMap{},
+					GroupAdd:      []string{},
+					Tmpfs:         map[string]string{},
+					UTSMode:       "host",
+					BlkioSettings: getDefaultBlkioSettings(),
+				},
+				NetworkSettings: &NetworkSettings{
+					Ports:    &nat.PortMap{},
+					Networks: map[string]*NetworkEndpointSettings{},
+				},
+				Config: &Config{
+					Labels: map[string]string{
+						labels.HealthCheck: hcJSON,
+					},
+					Healthcheck: hc,
+				},
+			},
+		},
 	}
 
 	for _, tc := range testcase {
@@ -308,12 +418,272 @@ func TestContainerFromNative(t *testing.T) {
 	}
 }
 
+func TestContainerFromNativeImage(t *testing.T) {
+	const (
+		ref    = "example.com/foo:latest"
+		digest = "sha256:0168606be2318a4b6a9ad9e5a6d9dbf1b0a6d7e2c8c4a1b0e5d3f2a1c0b9e8d7"
+	)
+
+	// Docker names the image a container was created from by digest, and keeps the reference the
+	// user asked for in Config.Image.
+	pinned, err := ContainerFromNative(&native.Container{
+		Container: containers.Container{
+			Image:  ref,
+			Labels: map[string]string{labels.ImageDigest: digest},
+		},
+		Spec: &specs.Spec{},
+	})
+	assert.NilError(t, err)
+	assert.Equal(t, pinned.Image, digest)
+	assert.Equal(t, pinned.Config.Image, ref)
+
+	// A container created before that digest was recorded, or created outside nerdctl, is left
+	// with the name it has.
+	unpinned, err := ContainerFromNative(&native.Container{
+		Container: containers.Container{Image: ref},
+		Spec:      &specs.Spec{},
+	})
+	assert.NilError(t, err)
+	assert.Equal(t, unpinned.Image, ref)
+	assert.Equal(t, unpinned.Config.Image, ref)
+}
+
+func TestGetCapabilitiesFromNative(t *testing.T) {
+	// Build the full default bounding set for test fixtures.
+	allDefaults := []string{
+		"CAP_CHOWN", "CAP_DAC_OVERRIDE", "CAP_FSETID", "CAP_FOWNER",
+		"CAP_MKNOD", "CAP_NET_RAW", "CAP_SETGID", "CAP_SETUID",
+		"CAP_SETFCAP", "CAP_SETPCAP", "CAP_NET_BIND_SERVICE",
+		"CAP_SYS_CHROOT", "CAP_KILL", "CAP_AUDIT_WRITE",
+	}
+
+	testcases := []struct {
+		name            string
+		spec            *specs.Spec
+		expectedCapAdd  []string
+		expectedCapDrop []string
+	}{
+		{
+			name: "default container",
+			spec: &specs.Spec{
+				Process: &specs.Process{
+					Capabilities: &specs.LinuxCapabilities{
+						Bounding: allDefaults,
+					},
+				},
+			},
+			expectedCapAdd:  []string{},
+			expectedCapDrop: []string{},
+		},
+		{
+			name: "cap added",
+			spec: &specs.Spec{
+				Process: &specs.Process{
+					Capabilities: &specs.LinuxCapabilities{
+						Bounding: append(allDefaults, "CAP_NET_ADMIN"),
+					},
+				},
+			},
+			expectedCapAdd:  []string{"CAP_NET_ADMIN"},
+			expectedCapDrop: []string{},
+		},
+		{
+			name: "cap dropped",
+			spec: &specs.Spec{
+				Process: &specs.Process{
+					Capabilities: &specs.LinuxCapabilities{
+						Bounding: func() []string {
+							var caps []string
+							for _, c := range allDefaults {
+								if c != "CAP_CHOWN" {
+									caps = append(caps, c)
+								}
+							}
+							return caps
+						}(),
+					},
+				},
+			},
+			expectedCapAdd:  []string{},
+			expectedCapDrop: []string{"CAP_CHOWN"},
+		},
+		{
+			name: "cap added and dropped",
+			spec: &specs.Spec{
+				Process: &specs.Process{
+					Capabilities: &specs.LinuxCapabilities{
+						Bounding: func() []string {
+							var caps []string
+							for _, c := range allDefaults {
+								if c != "CAP_CHOWN" {
+									caps = append(caps, c)
+								}
+							}
+							return append(caps, "CAP_NET_ADMIN")
+						}(),
+					},
+				},
+			},
+			expectedCapAdd:  []string{"CAP_NET_ADMIN"},
+			expectedCapDrop: []string{"CAP_CHOWN"},
+		},
+		{
+			name: "empty bounding set",
+			spec: &specs.Spec{
+				Process: &specs.Process{
+					Capabilities: &specs.LinuxCapabilities{
+						Bounding: []string{},
+					},
+				},
+			},
+			expectedCapAdd:  []string{},
+			expectedCapDrop: allDefaults,
+		},
+		{
+			name:            "nil process",
+			spec:            &specs.Spec{},
+			expectedCapAdd:  nil,
+			expectedCapDrop: nil,
+		},
+		{
+			name: "nil capabilities",
+			spec: &specs.Spec{
+				Process: &specs.Process{},
+			},
+			expectedCapAdd:  nil,
+			expectedCapDrop: nil,
+		},
+	}
+
+	for _, tc := range testcases {
+		t.Run(tc.name, func(tt *testing.T) {
+			capAdd, capDrop, err := getCapabilitiesFromNative(tc.spec)
+			assert.NilError(tt, err)
+			assert.DeepEqual(tt, capAdd, tc.expectedCapAdd)
+			// CapDrop order is non-deterministic (map iteration), so check length and contents
+			if tc.expectedCapDrop == nil {
+				assert.Assert(tt, capDrop == nil)
+			} else {
+				assert.Equal(tt, len(capDrop), len(tc.expectedCapDrop))
+				dropSet := make(map[string]struct{}, len(capDrop))
+				for _, c := range capDrop {
+					dropSet[c] = struct{}{}
+				}
+				for _, c := range tc.expectedCapDrop {
+					_, ok := dropSet[c]
+					assert.Assert(tt, ok, "expected %s in CapDrop", c)
+				}
+			}
+		})
+	}
+}
+
+func TestGetUlimitsFromNative(t *testing.T) {
+	testcases := []struct {
+		name     string
+		spec     *specs.Spec
+		expected []*units.Ulimit
+	}{
+		{
+			name: "single rlimit",
+			spec: &specs.Spec{
+				Process: &specs.Process{
+					Rlimits: []specs.POSIXRlimit{
+						{Type: "RLIMIT_NOFILE", Hard: 65536, Soft: 1024},
+					},
+				},
+			},
+			expected: []*units.Ulimit{
+				{Name: "nofile", Hard: 65536, Soft: 1024},
+			},
+		},
+		{
+			name: "multiple rlimits",
+			spec: &specs.Spec{
+				Process: &specs.Process{
+					Rlimits: []specs.POSIXRlimit{
+						{Type: "RLIMIT_NOFILE", Hard: 65536, Soft: 1024},
+						{Type: "RLIMIT_NPROC", Hard: 4096, Soft: 2048},
+					},
+				},
+			},
+			expected: []*units.Ulimit{
+				{Name: "nofile", Hard: 65536, Soft: 1024},
+				{Name: "nproc", Hard: 4096, Soft: 2048},
+			},
+		},
+		{
+			name: "no rlimits",
+			spec: &specs.Spec{
+				Process: &specs.Process{},
+			},
+			expected: nil,
+		},
+		{
+			name:     "nil process",
+			spec:     &specs.Spec{},
+			expected: nil,
+		},
+	}
+
+	for _, tc := range testcases {
+		t.Run(tc.name, func(tt *testing.T) {
+			result, err := getUlimitsFromNative(tc.spec)
+			assert.NilError(tt, err)
+			assert.DeepEqual(tt, result, tc.expected)
+		})
+	}
+}
+
+func TestNetworkFromNative(t *testing.T) {
+	// The first range-set is one subnet split into sub-ranges by an aux-address
+	// reservation and must collapse to a single IPAM.Config; the second set holds
+	// two distinct subnets that must both be kept; the empty set contributes
+	// nothing. Aux-addresses live in a nerdctl label (not the CNI config) and must
+	// be attached to the matching subnet while staying out of the user labels.
+	cni := `{"name":"testnet","plugins":[{"ipam":{"ranges":[` +
+		`[{"Subnet":"10.6.0.0/24","Gateway":"10.6.0.1"},{"Subnet":"10.6.0.0/24"}],` +
+		`[{"Subnet":"10.7.0.0/24"},{"Subnet":"10.8.0.0/24"}],` +
+		`[]` +
+		`]}}]}`
+	lbls := map[string]string{
+		labels.NetworkAuxAddresses: `{"10.6.0.0/24":{"router":"10.6.0.5"}}`,
+		"user":                     "keep",
+	}
+	got, err := NetworkFromNative(&native.Network{CNI: []byte(cni), NerdctlLabels: &lbls})
+	assert.NilError(t, err)
+	assert.DeepEqual(t, []IPAMConfig{
+		{Subnet: "10.6.0.0/24", Gateway: "10.6.0.1", AuxiliaryAddresses: map[string]string{"router": "10.6.0.5"}},
+		{Subnet: "10.7.0.0/24"},
+		{Subnet: "10.8.0.0/24"},
+	}, got.IPAM.Config)
+	// The internal aux label is hidden; genuine user labels are preserved.
+	assert.DeepEqual(t, map[string]string{"user": "keep"}, got.Labels)
+}
+
+func TestNetworkFromNativeMalformedAux(t *testing.T) {
+	// The aux label is a user-settable nerdctl/ key, so a malformed value must not
+	// fail the whole inspect: it is dropped, the config keeps no AuxiliaryAddresses,
+	// and the internal label still stays out of the user-visible labels.
+	cni := `{"name":"testnet","plugins":[{"ipam":{"ranges":[[{"Subnet":"10.6.0.0/24","Gateway":"10.6.0.1"}]]}}]}`
+	lbls := map[string]string{
+		labels.NetworkAuxAddresses: "not-json",
+		"user":                     "keep",
+	}
+	got, err := NetworkFromNative(&native.Network{CNI: []byte(cni), NerdctlLabels: &lbls})
+	assert.NilError(t, err)
+	assert.DeepEqual(t, []IPAMConfig{
+		{Subnet: "10.6.0.0/24", Gateway: "10.6.0.1"},
+	}, got.IPAM.Config)
+	assert.DeepEqual(t, map[string]string{"user": "keep"}, got.Labels)
+}
+
 func TestNetworkSettingsFromNative(t *testing.T) {
 	tempStateDir, err := os.MkdirTemp(t.TempDir(), "rw")
 	if err != nil {
 		t.Fatal(err)
 	}
-	os.WriteFile(filepath.Join(tempStateDir, "resolv.conf"), []byte(""), 0644)
+	filesystem.WriteFile(filepath.Join(tempStateDir, "resolv.conf"), []byte(""), 0644)
 	defer os.RemoveAll(tempStateDir)
 
 	testcase := []struct {
@@ -351,11 +721,17 @@ func TestNetworkSettingsFromNative(t *testing.T) {
 						Addrs:        []string{"10.0.4.30/24"},
 					},
 				},
+				PortMappings: []cni.PortMapping{
+					{
+						HostPort:      8075,
+						ContainerPort: 77,
+						Protocol:      "tcp",
+						HostIP:        "127.0.0.1",
+					},
+				},
 			},
 			s: &specs.Spec{
-				Annotations: map[string]string{
-					"nerdctl/ports": "[{\"HostPort\":8075,\"ContainerPort\":77,\"Protocol\":\"tcp\",\"HostIP\":\"127.0.0.1\"}]",
-				},
+				Annotations: map[string]string{},
 			},
 			expected: &NetworkSettings{
 				Ports: &nat.PortMap{
@@ -404,6 +780,83 @@ func TestNetworkSettingsFromNative(t *testing.T) {
 						IPAddress:   "10.0.4.30",
 						IPPrefixLen: 24,
 						MacAddress:  "xx:xx:xx:xx:xx:xx",
+					},
+				},
+			},
+		},
+		// Given native.NetNS whose eth0 maps to a named CNI network, Return
+		// NetworkSettings keyed by the real network name rather than "unknown-*".
+		//   UseCase: Inspect a Running Container attached to a named network (issue #2999)
+		{
+			name: "Given NetNS with eth0 and a networks annotation, Return NetworkSettings keyed by network name",
+			n: &native.NetNS{
+				Interfaces: []native.NetInterface{
+					{
+						Interface: net.Interface{
+							Index: 2,
+							MTU:   1500,
+							Name:  "eth0",
+							Flags: net.FlagUp,
+						},
+						HardwareAddr: "fa:b9:e3:9f:67:1b",
+						Flags:        []string{},
+						Addrs:        []string{"10.4.0.50/24"},
+					},
+				},
+			},
+			s: &specs.Spec{
+				Annotations: map[string]string{
+					labels.Networks: `["bridge"]`,
+				},
+			},
+			expected: &NetworkSettings{
+				Ports: &nat.PortMap{},
+				Networks: map[string]*NetworkEndpointSettings{
+					"bridge": {
+						IPAddress:   "10.4.0.50",
+						IPPrefixLen: 24,
+						MacAddress:  "fa:b9:e3:9f:67:1b",
+					},
+				},
+			},
+		},
+		// Given native.NetNS with eth0/eth1 and two networks, Return each
+		// endpoint keyed by its network name, matched in networks-list order.
+		{
+			name: "Given NetNS with eth0/eth1 and two networks, Return NetworkSettings keyed by network names",
+			n: &native.NetNS{
+				Interfaces: []native.NetInterface{
+					{
+						Interface:    net.Interface{Index: 2, MTU: 1500, Name: "eth0", Flags: net.FlagUp},
+						HardwareAddr: "fa:b9:e3:9f:67:1b",
+						Flags:        []string{},
+						Addrs:        []string{"10.4.0.50/24"},
+					},
+					{
+						Interface:    net.Interface{Index: 3, MTU: 1500, Name: "eth1", Flags: net.FlagUp},
+						HardwareAddr: "fa:b9:e3:9f:67:1c",
+						Flags:        []string{},
+						Addrs:        []string{"10.5.0.60/24"},
+					},
+				},
+			},
+			s: &specs.Spec{
+				Annotations: map[string]string{
+					labels.Networks: `["bridge","mynet"]`,
+				},
+			},
+			expected: &NetworkSettings{
+				Ports: &nat.PortMap{},
+				Networks: map[string]*NetworkEndpointSettings{
+					"bridge": {
+						IPAddress:   "10.4.0.50",
+						IPPrefixLen: 24,
+						MacAddress:  "fa:b9:e3:9f:67:1b",
+					},
+					"mynet": {
+						IPAddress:   "10.5.0.60",
+						IPPrefixLen: 24,
+						MacAddress:  "fa:b9:e3:9f:67:1c",
 					},
 				},
 			},
@@ -510,4 +963,132 @@ func TestCpuSettingsFromNative(t *testing.T) {
 			assert.DeepEqual(t, result, tc.expected)
 		})
 	}
+}
+
+func TestImageFromNative(t *testing.T) {
+	t.Run("parses RepoTags/Digests and RootFS Layers", func(t *testing.T) {
+		createdTime := time.Now().UTC()
+
+		img := native.Image{
+			Image: images.Image{
+				Name: "myrepo/myimage:custom",
+				Target: ocispec.Descriptor{
+					Digest: digest.Digest("sha256:targetdigest"),
+				},
+			},
+			ImageConfigDesc: ocispec.Descriptor{
+				Digest: digest.Digest("sha256:configdigest"),
+			},
+			ImageConfig: ocispec.Image{
+				RootFS: ocispec.RootFS{
+					Type:    "layers",
+					DiffIDs: []digest.Digest{"sha256:layer1", "sha256:layer2"},
+				},
+				History: []ocispec.History{
+					{
+						Created: &createdTime,
+						Author:  "test-author",
+						Comment: "test-comment",
+					},
+				},
+			},
+		}
+
+		out, err := ImageFromNative(&img)
+		assert.NilError(t, err)
+
+		// ID, tags, digests
+		assert.Equal(t, out.ID, "sha256:configdigest")
+		assert.Equal(t, out.RepoTags[0], "myrepo/myimage:custom")
+		assert.Equal(t, out.RepoDigests[0], "myrepo/myimage@sha256:targetdigest")
+
+		// RootFS
+		assert.DeepEqual(t, out.RootFS.Layers, []string{"sha256:layer1", "sha256:layer2"})
+
+		// History
+		assert.Equal(t, out.Author, "test-author")
+		assert.Equal(t, out.Comment, "test-comment")
+		assert.Equal(t, out.Created, createdTime.Format(time.RFC3339Nano))
+	})
+
+	t.Run("parses Healthcheck label", func(t *testing.T) {
+		testcases := []struct {
+			name     string
+			labels   map[string]string
+			expected *healthcheck.Healthcheck
+		}{
+			{
+				name: "Valid Healthcheck Label",
+				labels: map[string]string{
+					labels.HealthCheck: `{
+						"test": ["CMD-SHELL", "curl -f http://localhost/ || exit 1"],
+						"interval": 30000000000,
+						"timeout": 5000000000
+					}`,
+				},
+				expected: &healthcheck.Healthcheck{
+					Test:     []string{"CMD-SHELL", "curl -f http://localhost/ || exit 1"},
+					Interval: time.Second * 30,
+					Timeout:  time.Second * 5,
+				},
+			},
+			{
+				name:     "No Healthcheck Label",
+				labels:   map[string]string{},
+				expected: nil,
+			},
+		}
+
+		for _, tc := range testcases {
+			t.Run(tc.name, func(t *testing.T) {
+				img := native.Image{
+					ImageConfig: ocispec.Image{
+						Config: ocispec.ImageConfig{
+							Labels: tc.labels,
+						},
+					},
+				}
+
+				out, err := ImageFromNative(&img)
+				assert.NilError(t, err)
+				assert.DeepEqual(t, out.Config.Healthcheck, tc.expected)
+			})
+		}
+	})
+}
+
+func TestNetworkFromNativeIPRange(t *testing.T) {
+	// host-local stores only rangeStart/rangeEnd; inspect must recompute the
+	// --ip-range CIDR from them and report it under IPRange like Docker, while a
+	// subnet without an ip-range reports no IPRange.
+	cni := `{"name":"testnet","plugins":[{"ipam":{"ranges":[` +
+		`[{"subnet":"172.28.0.0/16","gateway":"172.28.5.254","rangeStart":"172.28.5.1","rangeEnd":"172.28.5.255"}],` +
+		`[{"subnet":"10.9.0.0/24","gateway":"10.9.0.1"}]` +
+		`]}}]}`
+	got, err := NetworkFromNative(&native.Network{CNI: []byte(cni)})
+	assert.NilError(t, err)
+	assert.DeepEqual(t, []IPAMConfig{
+		{Subnet: "172.28.0.0/16", Gateway: "172.28.5.254", IPRange: "172.28.5.0/24"},
+		{Subnet: "10.9.0.0/24", Gateway: "10.9.0.1"},
+	}, got.IPAM.Config)
+}
+
+func TestNetworkFromNativeIPRangeSplit(t *testing.T) {
+	// An aux-address reservation splits a subnet into sorted sub-ranges on disk.
+	// inspect must collapse them to one IPAM.Config and rebuild the ip-range from
+	// the outermost bounds: the first subnet reconstructs its original --ip-range,
+	// while the second spans its whole subnet (aux-address only, no --ip-range) and
+	// so reports no IPRange.
+	cni := `{"name":"testnet","plugins":[{"ipam":{"ranges":[` +
+		`[{"subnet":"172.28.0.0/16","gateway":"172.28.5.254","rangeStart":"172.28.5.1","rangeEnd":"172.28.5.9"},` +
+		`{"subnet":"172.28.0.0/16","rangeStart":"172.28.5.11","rangeEnd":"172.28.5.255"}],` +
+		`[{"subnet":"10.9.0.0/24","gateway":"10.9.0.1","rangeStart":"10.9.0.1","rangeEnd":"10.9.0.4"},` +
+		`{"subnet":"10.9.0.0/24","rangeStart":"10.9.0.6","rangeEnd":"10.9.0.254"}]` +
+		`]}}]}`
+	got, err := NetworkFromNative(&native.Network{CNI: []byte(cni)})
+	assert.NilError(t, err)
+	assert.DeepEqual(t, []IPAMConfig{
+		{Subnet: "172.28.0.0/16", Gateway: "172.28.5.254", IPRange: "172.28.5.0/24"},
+		{Subnet: "10.9.0.0/24", Gateway: "10.9.0.1"},
+	}, got.IPAM.Config)
 }

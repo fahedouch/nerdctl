@@ -18,6 +18,7 @@ package netutil
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 
@@ -30,7 +31,7 @@ const (
 
 	// When creating non-default network without passing in `--subnet` option,
 	// nerdctl assigns subnet address for the creation starting from `StartingCIDR`
-	// This prevents subnet address overlapping with `DefaultCIDR` used by the default networkß
+	// This prevents subnet address overlapping with `DefaultCIDR` used by the default network
 	StartingCIDR = "10.4.1.0/24"
 )
 
@@ -58,7 +59,7 @@ func (n *NetworkConfig) clean() error {
 	return nil
 }
 
-func (e *CNIEnv) generateCNIPlugins(driver string, name string, ipam map[string]interface{}, opts map[string]string, ipv6 bool) ([]CNIPlugin, error) {
+func (e *CNIEnv) generateCNIPlugins(driver string, name string, ipam map[string]interface{}, opts map[string]string, ipv6 bool, internal bool) ([]CNIPlugin, error) {
 	var plugins []CNIPlugin
 	switch driver {
 	case "nat":
@@ -71,27 +72,50 @@ func (e *CNIEnv) generateCNIPlugins(driver string, name string, ipam map[string]
 	return plugins, nil
 }
 
-func (e *CNIEnv) generateIPAM(driver string, subnets []string, gatewayStr, ipRangeStr string, opts map[string]string, ipv6 bool) (map[string]interface{}, error) {
+func (e *CNIEnv) generateIPAM(driver string, subnets []string, gateways []string, ipRanges []string, auxAddresses []string, opts map[string]string, ipv6, ipv4, internal bool) (map[string]interface{}, map[string]map[string]string, error) {
 	switch driver {
 	case "default":
 	default:
-		return nil, fmt.Errorf("unsupported ipam driver %q", driver)
+		return nil, nil, fmt.Errorf("unsupported ipam driver %q", driver)
+	}
+	// IPv6-only networks are not supported on Windows.
+	if !ipv4 {
+		return nil, nil, fmt.Errorf("--ipv4=false is not supported on Windows")
+	}
+	// The Windows nat IPAM has no way to reserve individual addresses, so there
+	// are never any aux-addresses to hand back to the caller.
+	if len(auxAddresses) > 0 {
+		return nil, nil, fmt.Errorf("--aux-address is not supported on Windows")
+	}
+
+	// Windows is single-subnet, so use at most one gateway and one ip-range.
+	gatewayStr := ""
+	if len(gateways) > 0 {
+		gatewayStr = gateways[0]
+	}
+	ipRangeStr := ""
+	if len(ipRanges) > 0 {
+		ipRangeStr = ipRanges[0]
 	}
 
 	ipamConfig := newWindowsIPAMConfig()
 	subnet, err := e.parseSubnet(subnets[0])
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	ipamRange, err := parseIPAMRange(subnet, gatewayStr, ipRangeStr)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	ipamConfig.Subnet = ipamRange.Subnet
 	ipamConfig.Routes = append(ipamConfig.Routes, IPAMRoute{Gateway: ipamRange.Gateway})
 	ipam, err := structToMap(ipamConfig)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return ipam, nil
+	return ipam, nil, nil
+}
+
+func FirewallPluginGEQVersion(firewallPath string, versionStr string) (bool, error) {
+	return false, errors.New("unsupported in windows")
 }

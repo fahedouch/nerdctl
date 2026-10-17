@@ -26,9 +26,9 @@ import (
 	"sync"
 	"time"
 
-	timetypes "github.com/docker/docker/api/types/time"
-
 	"github.com/containerd/log"
+
+	"github.com/containerd/nerdctl/v2/pkg/timestamp"
 )
 
 // Entry is compatible with Docker "json-file" logs
@@ -43,6 +43,30 @@ func Path(dataStore, ns, id string) string {
 	return filepath.Join(dataStore, "containers", ns, id, id+"-json.log")
 }
 
+// SyncEncoder writes individual json-file log entries to a writer. Its Encode
+// method is safe for concurrent use, so it can be shared between the goroutines
+// reading a container's stdout and stderr.
+type SyncEncoder struct {
+	mu  sync.Mutex
+	enc *json.Encoder
+}
+
+// NewSyncEncoder returns a SyncEncoder that writes to w.
+func NewSyncEncoder(w io.Writer) *SyncEncoder {
+	return &SyncEncoder{enc: json.NewEncoder(w)}
+}
+
+// Encode writes a single log entry for the given stream.
+func (s *SyncEncoder) Encode(stream, line string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.enc.Encode(&Entry{
+		Stream: stream,
+		Log:    line,
+		Time:   time.Now().UTC(),
+	})
+}
+
 func Encode(stdout <-chan string, stderr <-chan string, writer io.Writer) error {
 	enc := json.NewEncoder(writer)
 	var encMu sync.Mutex
@@ -54,7 +78,7 @@ func Encode(stdout <-chan string, stderr <-chan string, writer io.Writer) error 
 			Stream: name,
 		}
 		for logEntry := range dataChan {
-			e.Log = logEntry + "\n"
+			e.Log = logEntry
 			e.Time = time.Now().UTC()
 			encMu.Lock()
 			encErr := enc.Encode(e)
@@ -75,7 +99,7 @@ func writeEntry(e *Entry, stdout, stderr io.Writer, refTime time.Time, timestamp
 	output := []byte{}
 
 	if since != "" {
-		ts, err := timetypes.GetTimestamp(since, refTime)
+		ts, err := timestamp.GetTimestamp(since, refTime)
 		if err != nil {
 			return fmt.Errorf("invalid value for \"since\": %w", err)
 		}
@@ -90,7 +114,7 @@ func writeEntry(e *Entry, stdout, stderr io.Writer, refTime time.Time, timestamp
 	}
 
 	if until != "" {
-		ts, err := timetypes.GetTimestamp(until, refTime)
+		ts, err := timestamp.GetTimestamp(until, refTime)
 		if err != nil {
 			return fmt.Errorf("invalid value for \"until\": %w", err)
 		}

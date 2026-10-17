@@ -34,8 +34,6 @@ import (
 
 func TestComposeExec(t *testing.T) {
 	dockerComposeYAML := fmt.Sprintf(`
-version: '3.1'
-
 services:
   svc0:
     image: %s
@@ -179,8 +177,6 @@ services:
 func TestComposeExecTTY(t *testing.T) {
 	const expectedOutput = "speed 38400 baud"
 	dockerComposeYAML := fmt.Sprintf(`
-version: '3.1'
-
 services:
   svc0:
     image: %s
@@ -267,8 +263,6 @@ services:
 
 func TestComposeExecWithIndex(t *testing.T) {
 	dockerComposeYAML := fmt.Sprintf(`
-version: '3.1'
-
 services:
   svc0:
     image: %s
@@ -285,6 +279,11 @@ services:
 		data.Labels().Set("projectName", strings.ToLower(filepath.Base(data.Temp().Dir())))
 
 		helpers.Ensure("compose", "-f", yamlPath, "up", "-d", "svc0")
+
+		// Make sure all containers are started so that /etc/hosts is consistent.
+		for _, index := range []string{"1", "2", "3"} {
+			nerdtest.EnsureContainerStarted(helpers, fmt.Sprintf("%s-svc0-%s", data.Labels().Get("projectName"), index))
+		}
 	}
 
 	testCase.Cleanup = func(data test.Data, helpers test.Helpers) {

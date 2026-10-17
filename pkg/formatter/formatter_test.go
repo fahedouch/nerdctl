@@ -17,10 +17,13 @@
 package formatter
 
 import (
+	"bytes"
 	"testing"
 	"time"
 
 	"gotest.tools/v3/assert"
+
+	"github.com/containerd/go-cni"
 )
 
 func TestTimeSinceInHuman(t *testing.T) {
@@ -86,4 +89,186 @@ func TestTimeSinceInHuman(t *testing.T) {
 			assert.Equal(t, tt.expected, result)
 		})
 	}
+}
+
+func TestFormatPorts(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		input    []cni.PortMapping
+		expected string
+	}{
+		{
+			name: "a single tcp port on localhost",
+			input: []cni.PortMapping{
+				{
+					HostPort:      3000,
+					ContainerPort: 8080,
+					Protocol:      "tcp",
+					HostIP:        "127.0.0.1",
+				},
+			},
+			expected: "127.0.0.1:3000->8080/tcp",
+		},
+		{
+			name: "consecutive tcp ports on localhost",
+			input: []cni.PortMapping{
+				{
+					HostPort:      3000,
+					ContainerPort: 8080,
+					Protocol:      "tcp",
+					HostIP:        "127.0.0.1",
+				},
+				{
+					HostPort:      3001,
+					ContainerPort: 8081,
+					Protocol:      "tcp",
+					HostIP:        "127.0.0.1",
+				},
+			},
+			expected: "127.0.0.1:3000-3001->8080-8081/tcp",
+		},
+		{
+			name: "a single tcp port on anyhost",
+			input: []cni.PortMapping{
+				{
+					HostPort:      3000,
+					ContainerPort: 8080,
+					Protocol:      "tcp",
+					HostIP:        "0.0.0.0",
+				},
+			},
+			expected: "0.0.0.0:3000->8080/tcp",
+		},
+		{
+			name: "a single udp port on anyhost",
+			input: []cni.PortMapping{
+				{
+					HostPort:      3000,
+					ContainerPort: 8080,
+					Protocol:      "udp",
+					HostIP:        "0.0.0.0",
+				},
+			},
+			expected: "0.0.0.0:3000->8080/udp",
+		},
+		{
+			name: "mixed tcp and udp with consecutive ports on anyhost",
+			input: []cni.PortMapping{
+				{
+					HostPort:      3000,
+					ContainerPort: 8080,
+					Protocol:      "tcp",
+					HostIP:        "0.0.0.0",
+				},
+				{
+					HostPort:      3001,
+					ContainerPort: 8081,
+					Protocol:      "tcp",
+					HostIP:        "0.0.0.0",
+				},
+				{
+					HostPort:      3002,
+					ContainerPort: 8082,
+					Protocol:      "udp",
+					HostIP:        "0.0.0.0",
+				},
+				{
+					HostPort:      3003,
+					ContainerPort: 8083,
+					Protocol:      "udp",
+					HostIP:        "0.0.0.0",
+				},
+			},
+			expected: "0.0.0.0:3000-3001->8080-8081/tcp, 0.0.0.0:3002-3003->8082-8083/udp",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			result := FormatPorts(tt.input)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestEllipsis(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name            string
+		input           string
+		maxDisplayWidth int
+		expected        string
+	}{
+		{
+			name:            "ascii under limit",
+			input:           "hello",
+			maxDisplayWidth: 5,
+			expected:        "hello",
+		},
+		{
+			name:            "ascii truncated",
+			input:           "hello",
+			maxDisplayWidth: 4,
+			expected:        "hel…",
+		},
+		{
+			name:            "unicode truncated",
+			input:           "éclair",
+			maxDisplayWidth: 4,
+			expected:        "écl…",
+		},
+		{
+			name:            "unicode truncated to single rune",
+			input:           "éclair",
+			maxDisplayWidth: 1,
+			expected:        "é",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			result := Ellipsis(tt.input, tt.maxDisplayWidth)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestFormatInspectSlice(t *testing.T) {
+	t.Parallel()
+
+	t.Run("empty slice is ignored", func(t *testing.T) {
+		t.Parallel()
+
+		var buf bytes.Buffer
+		err := FormatInspectSlice("{{.ID}}", &buf, nil)
+		assert.NilError(t, err)
+		assert.Equal(t, "", buf.String())
+	})
+
+	t.Run("malformed template returns error", func(t *testing.T) {
+		t.Parallel()
+
+		var buf bytes.Buffer
+		err := FormatInspectSlice("{{bad", &buf, []interface{}{
+			map[string]string{"ID": "abc"},
+		})
+		assert.ErrorContains(t, err, "template")
+	})
+
+	t.Run("default format still works", func(t *testing.T) {
+		t.Parallel()
+
+		var buf bytes.Buffer
+		err := FormatInspectSlice("", &buf, []interface{}{
+			map[string]string{"ID": "abc"},
+		})
+		assert.NilError(t, err)
+		assert.Assert(t, buf.Len() > 0)
+	})
 }

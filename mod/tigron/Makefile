@@ -164,15 +164,15 @@ up:
 ##########################
 install-dev-tools:
 	$(call title, $@)
-	# golangci: v2.0.2 (2024-03-26)
-	# git-validation: main (2025-02-25)
-	# ltag: main (2025-03-04)
-	# go-licenses: v2.0.0-alpha.1 (2024-06-27)
+	# golangci: v2.14.0 (2026-09-24)
+	# git-validation: v1.2.2 (2025-02-26)
+	# ltag: v0.3.0 (2025-03-04)
+	# go-licenses: v2.0.1 (2025-09-08)
 	@cd $(MAKEFILE_DIR) \
-		&& go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@2b224c2cf4c9f261c22a16af7f8ca6408467f338 \
+		&& go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@114493f9b3e7257d29e4130f2b4a4aadefbb6845 \
 		&& go install github.com/vbatts/git-validation@7b60e35b055dd2eab5844202ffffad51d9c93922 \
 		&& go install github.com/containerd/ltag@66e6a514664ee2d11a470735519fa22b1a9eaabd \
-		&& go install github.com/google/go-licenses/v2@d01822334fba5896920a060f762ea7ecdbd086e8
+		&& go install github.com/google/go-licenses/v2@3e084b0caf710f7bfead967567539214f598c0a2
 	@echo "Remember to add \$$HOME/go/bin to your path"
 	$(call footer, $@)
 

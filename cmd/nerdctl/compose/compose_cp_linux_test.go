@@ -24,6 +24,7 @@ import (
 
 	"github.com/containerd/nerdctl/mod/tigron/expect"
 	"github.com/containerd/nerdctl/mod/tigron/test"
+	"github.com/containerd/nerdctl/mod/tigron/tig"
 
 	"github.com/containerd/nerdctl/v2/pkg/testutil"
 	"github.com/containerd/nerdctl/v2/pkg/testutil/nerdtest"
@@ -31,8 +32,6 @@ import (
 
 func TestComposeCopy(t *testing.T) {
 	var dockerComposeYAML = fmt.Sprintf(`
-version: '3.1'
-
 services:
   svc0:
     image: %s
@@ -79,7 +78,7 @@ services:
 			},
 			Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
 				return &test.Expected{
-					Output: func(stdout, info string, t *testing.T) {
+					Output: func(stdout string, t tig.T) {
 						copied := data.Temp().Load("test-file2")
 						assert.Equal(t, copied, testFileContent)
 					},

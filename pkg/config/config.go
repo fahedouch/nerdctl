@@ -28,6 +28,7 @@ import (
 type Config struct {
 	Debug            bool     `toml:"debug"`
 	DebugFull        bool     `toml:"debug_full"`
+	LogFile          string   `toml:"log_file,omitempty"`
 	Address          string   `toml:"address"`
 	Namespace        string   `toml:"namespace"`
 	Snapshotter      string   `toml:"snapshotter"`
@@ -41,9 +42,13 @@ type Config struct {
 	HostGatewayIP    string   `toml:"host_gateway_ip"`
 	BridgeIP         string   `toml:"bridge_ip, omitempty"`
 	KubeHideDupe     bool     `toml:"kube_hide_dupe"`
-	// CDISpecDirs is a list of directories in which CDI specifications can be found.
-	CDISpecDirs []string `toml:"cdi_spec_dirs,omitempty"`
-	UsernsRemap string   `toml:"userns_remap, omitempty"`
+	CDISpecDirs      []string `toml:"cdi_spec_dirs,omitempty"` // CDISpecDirs is a list of directories in which CDI specifications can be found.
+	UsernsRemap      string   `toml:"userns_remap, omitempty"`
+	DNS              []string `toml:"dns,omitempty"`
+	DNSOpts          []string `toml:"dns_opts,omitempty"`
+	DNSSearch        []string `toml:"dns_search,omitempty"`
+	DisableHCSystemd bool     `toml:"disable_hc_systemd"`
+	SelinuxEnabled   bool     `toml:"selinux_enabled"`
 }
 
 // New creates a default Config object statically,
@@ -52,6 +57,7 @@ func New() *Config {
 	return &Config{
 		Debug:            false,
 		DebugFull:        false,
+		LogFile:          "",
 		Address:          defaults.DefaultAddress,
 		Namespace:        namespaces.Default,
 		Snapshotter:      defaults.DefaultSnapshotter,
@@ -60,11 +66,16 @@ func New() *Config {
 		DataRoot:         ncdefaults.DataRoot(),
 		CgroupManager:    ncdefaults.CgroupManager(),
 		InsecureRegistry: false,
+		SelinuxEnabled:   false,
 		HostsDir:         ncdefaults.HostsDirs(),
 		Experimental:     true,
 		HostGatewayIP:    ncdefaults.HostGatewayIP(),
 		KubeHideDupe:     false,
 		CDISpecDirs:      ncdefaults.CDISpecDirs(),
 		UsernsRemap:      "",
+		DNS:              []string{},
+		DNSOpts:          []string{},
+		DNSSearch:        []string{},
+		DisableHCSystemd: false,
 	}
 }

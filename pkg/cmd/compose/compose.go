@@ -33,7 +33,9 @@ import (
 	"github.com/containerd/nerdctl/v2/pkg/cmd/volume"
 	"github.com/containerd/nerdctl/v2/pkg/composer"
 	"github.com/containerd/nerdctl/v2/pkg/composer/serviceparser"
+	"github.com/containerd/nerdctl/v2/pkg/config"
 	"github.com/containerd/nerdctl/v2/pkg/imgutil"
+	"github.com/containerd/nerdctl/v2/pkg/internal/filesystem"
 	"github.com/containerd/nerdctl/v2/pkg/ipfs"
 	"github.com/containerd/nerdctl/v2/pkg/netutil"
 	"github.com/containerd/nerdctl/v2/pkg/referenceutil"
@@ -50,7 +52,10 @@ func New(client *containerd.Client, globalOptions types.GlobalCommandOptions, op
 		return nil, err
 	}
 
-	cniEnv, err := netutil.NewCNIEnv(globalOptions.CNIPath, globalOptions.CNINetConfPath, netutil.WithNamespace(globalOptions.Namespace), netutil.WithDefaultNetwork(globalOptions.BridgeIP))
+	// The default network is deliberately not created here. It is only needed by
+	// services that actually attach to it, and `nerdctl run` already creates it on
+	// demand.
+	cniEnv, err := netutil.NewCNIEnv(globalOptions.CNIPath, globalOptions.CNINetConfPath, netutil.WithNamespace(globalOptions.Namespace))
 	if err != nil {
 		return nil, err
 	}
@@ -136,7 +141,7 @@ func New(client *containerd.Client, globalOptions types.GlobalCommandOptions, op
 					return err
 				}
 				defer os.RemoveAll(dir)
-				if err := os.WriteFile(filepath.Join(dir, "api"), []byte(ipfsAddress), 0600); err != nil {
+				if err := filesystem.WriteFile(filepath.Join(dir, "api"), []byte(ipfsAddress), 0600); err != nil {
 					return err
 				}
 				ipfsPath = dir
@@ -155,32 +160,32 @@ func New(client *containerd.Client, globalOptions types.GlobalCommandOptions, op
 		return err
 	}
 
-	return composer.New(options, client)
+	return composer.New(options, client, (*config.Config)(&globalOptions))
 }
 
 func imageVerifyOptionsFromCompose(ps *serviceparser.Service) types.ImageVerifyOptions {
 	var opt types.ImageVerifyOptions
-	if verifier, ok := ps.Unparsed.Extensions[serviceparser.ComposeVerify]; ok {
-		opt.Provider = verifier.(string)
+	if verifier, ok := ps.Unparsed.Extensions[serviceparser.ComposeVerify].(string); ok {
+		opt.Provider = verifier
 	} else {
 		opt.Provider = "none"
 	}
 
 	// for cosign, if key is given, use key mode, otherwise use keyless mode.
-	if keyVal, ok := ps.Unparsed.Extensions[serviceparser.ComposeCosignPublicKey]; ok {
-		opt.CosignKey = keyVal.(string)
+	if keyVal, ok := ps.Unparsed.Extensions[serviceparser.ComposeCosignPublicKey].(string); ok {
+		opt.CosignKey = keyVal
 	}
-	if ciVal, ok := ps.Unparsed.Extensions[serviceparser.ComposeCosignCertificateIdentity]; ok {
-		opt.CosignCertificateIdentity = ciVal.(string)
+	if ciVal, ok := ps.Unparsed.Extensions[serviceparser.ComposeCosignCertificateIdentity].(string); ok {
+		opt.CosignCertificateIdentity = ciVal
 	}
-	if cirVal, ok := ps.Unparsed.Extensions[serviceparser.ComposeCosignCertificateIdentityRegexp]; ok {
-		opt.CosignCertificateIdentityRegexp = cirVal.(string)
+	if cirVal, ok := ps.Unparsed.Extensions[serviceparser.ComposeCosignCertificateIdentityRegexp].(string); ok {
+		opt.CosignCertificateIdentityRegexp = cirVal
 	}
-	if coiVal, ok := ps.Unparsed.Extensions[serviceparser.ComposeCosignCertificateOidcIssuer]; ok {
-		opt.CosignCertificateOidcIssuer = coiVal.(string)
+	if coiVal, ok := ps.Unparsed.Extensions[serviceparser.ComposeCosignCertificateOidcIssuer].(string); ok {
+		opt.CosignCertificateOidcIssuer = coiVal
 	}
-	if coirVal, ok := ps.Unparsed.Extensions[serviceparser.ComposeCosignCertificateOidcIssuerRegexp]; ok {
-		opt.CosignCertificateOidcIssuerRegexp = coirVal.(string)
+	if coirVal, ok := ps.Unparsed.Extensions[serviceparser.ComposeCosignCertificateOidcIssuerRegexp].(string); ok {
+		opt.CosignCertificateOidcIssuerRegexp = coirVal
 	}
 	return opt
 }

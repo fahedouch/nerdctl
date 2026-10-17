@@ -44,10 +44,12 @@ import (
 	"github.com/containerd/go-cni"
 	"github.com/containerd/log"
 
+	"github.com/containerd/nerdctl/v2/pkg/healthcheck"
 	"github.com/containerd/nerdctl/v2/pkg/imgutil"
 	"github.com/containerd/nerdctl/v2/pkg/inspecttypes/native"
 	"github.com/containerd/nerdctl/v2/pkg/ipcutil"
 	"github.com/containerd/nerdctl/v2/pkg/labels"
+	subnetutil "github.com/containerd/nerdctl/v2/pkg/netutil/subnet"
 	"github.com/containerd/nerdctl/v2/pkg/ocihook/state"
 )
 
@@ -141,26 +143,27 @@ type HostConfig struct {
 	// Binds           []string      // List of volume bindings for this container
 	ContainerIDFile string          // File (path) where the containerId is written
 	LogConfig       loggerLogConfig // Configuration of the logs for this container
-	// NetworkMode     NetworkMode   // Network mode to use for the container
-	PortBindings nat.PortMap // Port mapping between the exposed port (container) and the host
-	// RestartPolicy   RestartPolicy // Restart policy to be used for the container
-	// AutoRemove      bool          // Automatically remove container when it exits
+	NetworkMode     string          // Network mode to use for the container
+	PortBindings    nat.PortMap     // Port mapping between the exposed port (container) and the host
+	RestartPolicy   RestartPolicy   // Restart policy to be used for the container
+	AutoRemove      bool            // Automatically remove container when it exits
 	// VolumeDriver    string        // Name of the volume driver used to mount volumes
 	// VolumesFrom     []string      // List of volumes to take from other container
-	// CapAdd          strslice.StrSlice // List of kernel capabilities to add to the container
-	// CapDrop         strslice.StrSlice // List of kernel capabilities to remove from the container
+	CapAdd  []string // List of kernel capabilities to add to the container
+	CapDrop []string // List of kernel capabilities to remove from the container
 
-	CgroupnsMode string   // Cgroup namespace mode to use for the container
-	DNS          []string `json:"Dns"`        // List of DNS server to lookup
-	DNSOptions   []string `json:"DnsOptions"` // List of DNSOption to look for
-	DNSSearch    []string `json:"DnsSearch"`  // List of DNSSearch to look for
-	ExtraHosts   []string // List of extra hosts
-	GroupAdd     []string // GroupAdd specifies additional groups to join
-	IpcMode      string   `json:"IpcMode"` // IPC namespace to use for the container
+	CgroupnsMode string            // Cgroup namespace mode to use for the container
+	DNS          []string          `json:"Dns"`        // List of DNS server to lookup
+	DNSOptions   []string          `json:"DnsOptions"` // List of DNSOption to look for
+	DNSSearch    []string          `json:"DnsSearch"`  // List of DNSSearch to look for
+	ExtraHosts   []string          // List of extra hosts
+	GroupAdd     []string          // GroupAdd specifies additional groups to join
+	IpcMode      string            `json:"IpcMode"`    // IPC namespace to use for the container
+	Annotations  map[string]string `json:",omitempty"` // Arbitrary non-identifying metadata attached to container and provided to the runtime
 	// Cgroup          CgroupSpec        // Cgroup to use for the container
 	OomScoreAdj int    // specifies the tune container’s OOM preferences (-1000 to 1000, rootless: 100 to 1000)
 	PidMode     string // PID namespace to use for the container
-	// Privileged      bool              // Is the container in privileged mode
+	Privileged  bool   // Is the container in privileged mode
 	// PublishAllPorts bool              // Should docker publish all exposed port for the container
 	ReadonlyRootfs bool // Is the container root filesystem in read-only
 	// SecurityOpt     []string          // List of string values to customize labels for MLS systems, such as SELinux.
@@ -179,9 +182,13 @@ type HostConfig struct {
 	CPURealtimeRuntime int64             `json:"CpuRealtimeRuntime"` // Limits the CPU real-time runtime in microseconds
 	Memory             int64             // Memory limit (in bytes)
 	MemorySwap         int64             // Total memory usage (memory + swap); set `-1` to enable unlimited swap
+	MemoryReservation  int64             // Memory soft limit (in bytes)
+	MemorySwappiness   *int64            // Tuning container memory swappiness (0 to 100); nil means not set
+	PidsLimit          int64             // Setting PIDs limit for a container; 0 or -1 for unlimited
+	Ulimits            []*units.Ulimit   // List of ulimits to be set in the container
 	OomKillDisable     bool              // specifies whether to disable OOM Killer
 	Devices            []DeviceMapping   // List of devices to map inside the container
-	LinuxBlkioSettings
+	BlkioSettings
 }
 
 // From https://github.com/moby/moby/blob/v20.10.1/api/types/types.go#L416-L427
@@ -210,11 +217,11 @@ type Config struct {
 	// TODO: Tty          bool        // Attach standard streams to a tty, including stdin if it is not closed.
 	// TODO: OpenStdin    bool        // Open stdin
 	// TODO: StdinOnce    bool        // If true, close stdin after the 1 attached client disconnects.
-	Env []string `json:",omitempty"` // List of environment variable to set in the container
-	Cmd []string `json:",omitempty"` // Command to run when starting the container
-	// TODO Healthcheck     *HealthConfig       `json:",omitempty"` // Healthcheck describes how to check the container is healthy
+	Env         []string                 `json:",omitempty"` // List of environment variable to set in the container
+	Cmd         []string                 `json:",omitempty"` // Command to run when starting the container
+	Healthcheck *healthcheck.Healthcheck `json:",omitempty"` // Healthcheck describes how to check the container is healthy
 	// TODO: ArgsEscaped     bool                `json:",omitempty"` // True if command is already escaped (meaning treat as a command line) (Windows specific).
-	// TODO: Image           string              // Name of the image as it was passed by the operator (e.g. could be symbolic)
+	Image      string              `json:",omitempty"` // Name of the image as it was passed by the operator (e.g. could be symbolic)
 	Volumes    map[string]struct{} `json:",omitempty"` // List of volumes (mounts) used for the container
 	WorkingDir string              `json:",omitempty"` // Current directory (PWD) in the command will be launched
 	Entrypoint []string            `json:",omitempty"` // Entrypoint to run when starting the container
@@ -240,7 +247,7 @@ type ContainerState struct {
 	Error      string
 	StartedAt  string
 	FinishedAt string
-	// TODO: Health     *Health `json:",omitempty"`
+	Health     *healthcheck.Health `json:",omitempty"`
 }
 
 type NetworkSettings struct {
@@ -265,6 +272,12 @@ type DeviceMapping struct {
 	PathOnHost        string
 	PathInContainer   string
 	CgroupPermissions string
+}
+
+// RestartPolicy represents the restart policies of the container.
+type RestartPolicy struct {
+	Name              string
+	MaximumRetryCount int
 }
 
 type CPUSettings struct {
@@ -308,13 +321,39 @@ type NetworkEndpointSettings struct {
 	// TODO DriverOpts          map[string]string
 }
 
-type LinuxBlkioSettings struct {
-	BlkioWeight          uint16 // Block IO weight (relative weight vs. other containers)
-	BlkioWeightDevice    []*specs.LinuxWeightDevice
-	BlkioDeviceReadBps   []*specs.LinuxThrottleDevice
-	BlkioDeviceWriteBps  []*specs.LinuxThrottleDevice
-	BlkioDeviceReadIOps  []*specs.LinuxThrottleDevice
-	BlkioDeviceWriteIOps []*specs.LinuxThrottleDevice
+// defaultCaps mirrors containerd's defaultUnixCaps() — the 14 capabilities
+// granted to non-privileged containers by default. Used as the baseline for
+// reconstructing CapAdd/CapDrop from the OCI spec's bounding set.
+var defaultCaps = map[string]struct{}{
+	"CAP_CHOWN":            {},
+	"CAP_DAC_OVERRIDE":     {},
+	"CAP_FSETID":           {},
+	"CAP_FOWNER":           {},
+	"CAP_MKNOD":            {},
+	"CAP_NET_RAW":          {},
+	"CAP_SETGID":           {},
+	"CAP_SETUID":           {},
+	"CAP_SETFCAP":          {},
+	"CAP_SETPCAP":          {},
+	"CAP_NET_BIND_SERVICE": {},
+	"CAP_SYS_CHROOT":       {},
+	"CAP_KILL":             {},
+	"CAP_AUDIT_WRITE":      {},
+}
+
+// containerImage is the image the container was created from, the way Docker identifies it: by
+// digest, pinned when the container was created. containerd only records the image name, and a name
+// can later be retagged onto another image, so it is not an answer. The name is still the fallback
+// for the containers created before that digest was recorded, or created outside nerdctl.
+//
+// With the containerd image store, the image ID Docker reports here is the digest of the image
+// target (moby daemon/containerd/image.go, image.ID(img.Target.Digest)), which is what nerdctl
+// pins.
+func containerImage(n *native.Container) string {
+	if dgst := n.Labels[labels.ImageDigest]; dgst != "" {
+		return dgst
+	}
+	return n.Image
 }
 
 // ContainerFromNative instantiates a Docker-compatible Container from containerd-native Container.
@@ -323,7 +362,7 @@ func ContainerFromNative(n *native.Container) (*Container, error) {
 	c := &Container{
 		ID:      n.ID,
 		Created: n.CreatedAt.Format(time.RFC3339Nano),
-		Image:   n.Image,
+		Image:   containerImage(n),
 		Name:    n.Labels[labels.Name],
 		Driver:  n.Snapshotter,
 		// XXX is this always right? what if the container OS is NOT the same as the host OS?
@@ -377,7 +416,7 @@ func ContainerFromNative(n *native.Container) (*Container, error) {
 	}
 
 	c.HostConfig.Tmpfs = make(map[string]string)
-	if nerdctlMounts := n.Labels[labels.Mounts]; nerdctlMounts != "" {
+	if nerdctlMounts := labels.GetMount(n.Labels); nerdctlMounts != "" {
 		mounts, err := parseMounts(nerdctlMounts)
 		if err != nil {
 			return nil, err
@@ -508,6 +547,11 @@ func ContainerFromNative(n *native.Container) (*Container, error) {
 	c.HostConfig.OomKillDisable = memorySettings.DisableOOMKiller
 	c.HostConfig.Memory = memorySettings.Limit
 	c.HostConfig.MemorySwap = memorySettings.Swap
+	c.HostConfig.MemoryReservation = memorySettings.Reservation
+	if memorySettings.Swappiness != nil {
+		swappiness := int64(*memorySettings.Swappiness)
+		c.HostConfig.MemorySwappiness = &swappiness
+	}
 
 	dnsSettings, err := getDNSFromNative(n.Labels)
 	if err != nil {
@@ -548,7 +592,17 @@ func ContainerFromNative(n *native.Container) (*Container, error) {
 	c.State = cs
 	c.Config = &Config{
 		Labels: n.Labels,
+		// Docker keeps the reference the user asked for here, and the digest in Image above.
+		Image: n.Image,
 	}
+	if exposedPortsJSON := n.Labels[labels.ExposedPorts]; exposedPortsJSON != "" {
+		var exposedPorts nat.PortSet
+		if err := json.Unmarshal([]byte(exposedPortsJSON), &exposedPorts); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal exposed ports: %w", err)
+		}
+		c.Config.ExposedPorts = exposedPorts
+	}
+
 	if n.Labels[labels.Hostname] != "" {
 		hostname = n.Labels[labels.Hostname]
 	}
@@ -578,6 +632,83 @@ func ContainerFromNative(n *native.Container) (*Container, error) {
 
 	if n.Labels[labels.User] != "" {
 		c.Config.User = n.Labels[labels.User]
+	}
+
+	capAdd, capDrop, err := getCapabilitiesFromNative(n.Spec.(*specs.Spec))
+	if err != nil {
+		return nil, fmt.Errorf("failed to get capabilities: %w", err)
+	}
+	c.HostConfig.CapAdd = capAdd
+	c.HostConfig.CapDrop = capDrop
+
+	ulimits, err := getUlimitsFromNative(n.Spec.(*specs.Spec))
+	if err != nil {
+		return nil, fmt.Errorf("failed to get ulimits: %w", err)
+	}
+	c.HostConfig.Ulimits = ulimits
+
+	if policyStr := n.Labels[restart.PolicyLabel]; policyStr != "" {
+		rp, err := restart.NewPolicy(policyStr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse restart policy: %w", err)
+		}
+		c.HostConfig.RestartPolicy = RestartPolicy{
+			Name:              rp.Name(),
+			MaximumRetryCount: rp.MaximumRetryCount(),
+		}
+	}
+
+	if len(containerAnnotations) > 0 {
+		userAnnotations := make(map[string]string)
+		for k, v := range containerAnnotations {
+			if !strings.HasPrefix(k, labels.Prefix) {
+				userAnnotations[k] = v
+			}
+		}
+		if len(userAnnotations) > 0 {
+			c.HostConfig.Annotations = userAnnotations
+		}
+	}
+
+	if sp, ok := n.Spec.(*specs.Spec); ok {
+		if sp.Linux != nil && sp.Linux.Resources != nil &&
+			sp.Linux.Resources.Pids != nil && sp.Linux.Resources.Pids.Limit != nil {
+			c.HostConfig.PidsLimit = *sp.Linux.Resources.Pids.Limit
+		}
+	}
+
+	if networksJSON := n.Labels[labels.Networks]; networksJSON != "" {
+		var networks []string
+		if err := json.Unmarshal([]byte(networksJSON), &networks); err != nil {
+			return nil, fmt.Errorf("failed to parse networks label: %v", err)
+		}
+		if len(networks) > 0 {
+			c.HostConfig.NetworkMode = networks[0]
+		}
+	}
+
+	c.HostConfig.Privileged = n.Labels[labels.Privileged] == "true"
+
+	c.HostConfig.AutoRemove = n.Labels[labels.ContainerAutoRemove] == "true"
+
+	// Add health check config if present in labels
+	if hConfig, ok := n.Labels[labels.HealthCheck]; ok && hConfig != "" {
+		healthCheckConfig, err := healthcheck.HealthCheckFromJSON(hConfig)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse healthcheck label: %w", err)
+		}
+		c.Config.Healthcheck = healthCheckConfig
+	}
+
+	// Add health status to container state.
+	if healthState, ok := n.Labels[labels.HealthState]; ok && healthState != "" {
+		healthStatus, err := healthcheck.ReadHealthStatusForInspect(n.Labels[labels.StateDir], n.Labels[labels.HealthState])
+		if err != nil {
+			return nil, fmt.Errorf("failed to get health status for inspect: %w", err)
+		}
+		if healthStatus != nil {
+			c.State.Health = healthStatus
+		}
 	}
 
 	return c, nil
@@ -627,6 +758,16 @@ func ImageFromNative(nativeImage *native.Image) (*Image, error) {
 		Entrypoint:   imgOCI.Config.Entrypoint,
 		Labels:       imgOCI.Config.Labels,
 		ExposedPorts: portSet,
+		Image:        nativeImage.Image.Name,
+	}
+
+	// Add health check if present in labels
+	if healthStr, ok := imgOCI.Config.Labels[labels.HealthCheck]; ok && healthStr != "" {
+		healthCheckConfig, err := healthcheck.HealthCheckFromJSON(healthStr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse healthcheck label: %w", err)
+		}
+		image.Config.Healthcheck = healthCheckConfig
 	}
 
 	return image, nil
@@ -664,7 +805,7 @@ func statusFromNative(x containerd.Status, labels map[string]string) string {
 	}
 }
 
-func networkSettingsFromNative(n *native.NetNS, sp *specs.Spec) (*NetworkSettings, error) {
+func networkSettingsFromNative(n *native.NetNS, spec *specs.Spec) (*NetworkSettings, error) {
 	res := &NetworkSettings{
 		Networks: make(map[string]*NetworkEndpointSettings),
 	}
@@ -672,6 +813,19 @@ func networkSettingsFromNative(n *native.NetNS, sp *specs.Spec) (*NetworkSetting
 	res.Ports = &resPortMap
 	if n == nil {
 		return res, nil
+	}
+
+	// CNI names the interface for the i-th network "eth<i>" (see go-cni
+	// getIfName), in the order the container's networks were attached. Recover
+	// that ordered list from the spec annotations so each endpoint can be keyed
+	// by its real network name instead of a synthesized "unknown-*" placeholder.
+	var networks []string
+	if spec != nil {
+		if networksJSON := spec.Annotations[labels.Networks]; networksJSON != "" {
+			if err := json.Unmarshal([]byte(networksJSON), &networks); err != nil {
+				return nil, fmt.Errorf("failed to parse networks annotation %q: %w", networksJSON, err)
+			}
+		}
 	}
 
 	var primary *NetworkEndpointSettings
@@ -703,23 +857,14 @@ func networkSettingsFromNative(n *native.NetNS, sp *specs.Spec) (*NetworkSetting
 				nes.GlobalIPv6PrefixLen = ones
 			}
 		}
-		// TODO: set CNI name when possible
-		fakeDockerNetworkName := fmt.Sprintf("unknown-%s", x.Name)
-		res.Networks[fakeDockerNetworkName] = nes
+		res.Networks[cniNetworkName(x.Name, networks)] = nes
 
-		if portsLabel, ok := sp.Annotations[labels.Ports]; ok {
-			var ports []cni.PortMapping
-			err := json.Unmarshal([]byte(portsLabel), &ports)
-			if err != nil {
-				return nil, err
-			}
-			nports, err := convertToNatPort(ports)
-			if err != nil {
-				return nil, err
-			}
-			for portLabel, portBindings := range *nports {
-				resPortMap[portLabel] = portBindings
-			}
+		nports, err := convertToNatPort(n.PortMappings)
+		if err != nil {
+			return nil, err
+		}
+		for portLabel, portBindings := range *nports {
+			resPortMap[portLabel] = portBindings
 		}
 
 		if x.Index == n.PrimaryInterface {
@@ -735,6 +880,21 @@ func networkSettingsFromNative(n *native.NetNS, sp *specs.Spec) (*NetworkSetting
 		res.DefaultNetworkSettings.GlobalIPv6PrefixLen = primary.GlobalIPv6PrefixLen
 	}
 	return res, nil
+}
+
+// cniNetworkName maps a container interface name to the CNI network it belongs
+// to. go-cni names the i-th network's interface "<prefix><i>" (defaulting to
+// "eth0", "eth1", ...; see go-cni getIfName), so an "eth<i>" interface resolves
+// to networks[i]. Anything that does not fit that scheme (host networking, an
+// interface not created by CNI, or a missing/short networks list) falls back to
+// the historical "unknown-<name>" key.
+func cniNetworkName(ifName string, networks []string) string {
+	if idx, ok := strings.CutPrefix(ifName, cni.DefaultPrefix); ok {
+		if i, err := strconv.Atoi(idx); err == nil && i >= 0 && i < len(networks) {
+			return networks[i]
+		}
+	}
+	return fmt.Sprintf("unknown-%s", ifName)
 }
 
 func cpuSettingsFromNative(sp *specs.Spec) (*CPUSettings, error) {
@@ -834,6 +994,15 @@ func getMemorySettingsFromNative(sp *specs.Spec) (*MemorySetting, error) {
 		if sp.Linux.Resources.Memory.Swap != nil {
 			res.Swap = *sp.Linux.Resources.Memory.Swap
 		}
+
+		if sp.Linux.Resources.Memory.Reservation != nil {
+			res.Reservation = *sp.Linux.Resources.Memory.Reservation
+		}
+
+		if sp.Linux.Resources.Memory.Swappiness != nil {
+			v := *sp.Linux.Resources.Memory.Swappiness
+			res.Swappiness = &v
+		}
 	}
 	return res, nil
 }
@@ -888,10 +1057,48 @@ func getSysctlFromNative(sp *specs.Spec) (map[string]string, error) {
 	return res, nil
 }
 
+func getCapabilitiesFromNative(sp *specs.Spec) (capAdd, capDrop []string, err error) {
+	if sp.Process == nil || sp.Process.Capabilities == nil {
+		return nil, nil, nil
+	}
+	capAdd = []string{}
+	capDrop = []string{}
+	boundingSet := make(map[string]struct{}, len(sp.Process.Capabilities.Bounding))
+	for _, cap := range sp.Process.Capabilities.Bounding {
+		boundingSet[cap] = struct{}{}
+		if _, isDefault := defaultCaps[cap]; !isDefault {
+			capAdd = append(capAdd, cap)
+		}
+	}
+	for cap := range defaultCaps {
+		if _, present := boundingSet[cap]; !present {
+			capDrop = append(capDrop, cap)
+		}
+	}
+	return capAdd, capDrop, nil
+}
+
+func getUlimitsFromNative(sp *specs.Spec) ([]*units.Ulimit, error) {
+	if sp.Process == nil || len(sp.Process.Rlimits) == 0 {
+		return nil, nil
+	}
+	ulimits := make([]*units.Ulimit, 0, len(sp.Process.Rlimits))
+	for _, rl := range sp.Process.Rlimits {
+		name := strings.ToLower(strings.TrimPrefix(rl.Type, "RLIMIT_"))
+		ulimits = append(ulimits, &units.Ulimit{
+			Name: name,
+			Hard: int64(rl.Hard),
+			Soft: int64(rl.Soft),
+		})
+	}
+	return ulimits, nil
+}
+
 type IPAMConfig struct {
-	Subnet  string `json:"Subnet,omitempty"`
-	Gateway string `json:"Gateway,omitempty"`
-	IPRange string `json:"IPRange,omitempty"`
+	Subnet             string            `json:"Subnet,omitempty"`
+	Gateway            string            `json:"Gateway,omitempty"`
+	IPRange            string            `json:"IPRange,omitempty"`
+	AuxiliaryAddresses map[string]string `json:"AuxiliaryAddresses,omitempty"`
 }
 
 type IPAM struct {
@@ -913,24 +1120,121 @@ type Network struct {
 type EndpointResource struct {
 	Name string `json:"Name"`
 	// EndpointID  string `json:"EndpointID"`
-	// MacAddress  string `json:"MacAddress"`
-	// IPv4Address string `json:"IPv4Address"`
-	// IPv6Address string `json:"IPv6Address"`
+	MacAddress  string `json:"MacAddress"`
+	IPv4Address string `json:"IPv4Address"`
+	IPv6Address string `json:"IPv6Address"`
 }
 
 type structuredCNI struct {
 	Name    string `json:"name"`
 	Plugins []struct {
 		Ipam struct {
-			Ranges [][]IPAMConfig `json:"ranges"`
+			Ranges [][]cniIPAMRange `json:"ranges"`
 		} `json:"ipam"`
 	} `json:"plugins"`
 }
 
+// cniIPAMRange is the on-disk host-local range. Its bounds let inspect recompute
+// the ip-range CIDR, which host-local has no field for.
+type cniIPAMRange struct {
+	Subnet     string `json:"subnet"`
+	Gateway    string `json:"gateway"`
+	RangeStart string `json:"rangeStart"`
+	RangeEnd   string `json:"rangeEnd"`
+}
+
 type MemorySetting struct {
-	Limit            int64 `json:"limit"`
-	Swap             int64 `json:"swap"`
-	DisableOOMKiller bool  `json:"disableOOMKiller"`
+	Limit            int64   `json:"limit"`
+	Swap             int64   `json:"swap"`
+	Reservation      int64   `json:"reservation"`
+	Swappiness       *uint64 `json:"swappiness"`
+	DisableOOMKiller bool    `json:"disableOOMKiller"`
+}
+
+// parseNetworkSubnets extracts and parses subnet configurations from IPAM config
+func parseNetworkSubnets(ipamConfigs []IPAMConfig) []*net.IPNet {
+	var subnets []*net.IPNet
+	for _, config := range ipamConfigs {
+		if config.Subnet != "" {
+			_, subnet, err := net.ParseCIDR(config.Subnet)
+			if err != nil {
+				log.L.WithError(err).Warnf("failed to parse subnet %q", config.Subnet)
+				continue
+			}
+			subnets = append(subnets, subnet)
+		}
+	}
+	return subnets
+}
+
+// isUsableInterface checks if a network interface is usable (not loopback and interface is up)
+func isUsableInterface(iface *native.NetInterface) bool {
+	return iface.Interface.Flags&net.FlagLoopback == 0 &&
+		iface.Interface.Flags&net.FlagUp != 0
+}
+
+// setIPAddresses assigns IPv4 or IPv6 addresses from CIDR notation to the endpoint
+func setIPAddresses(endpoint *EndpointResource, cidr string) {
+	ip, _, err := net.ParseCIDR(cidr)
+	if err != nil {
+		return
+	}
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+		return
+	}
+
+	if ip.To4() != nil {
+		endpoint.IPv4Address = cidr
+	} else if ip.To16() != nil {
+		endpoint.IPv6Address = cidr
+	}
+}
+
+// matchInterfaceToSubnets tries to match an interface to network subnets
+func matchInterfaceToSubnets(endpoint *EndpointResource, iface *native.NetInterface, subnets []*net.IPNet) bool {
+	matched := false
+	for _, addr := range iface.Addrs {
+		ip, _, err := net.ParseCIDR(addr)
+		if err != nil || ip.IsLoopback() || ip.IsLinkLocalUnicast() {
+			continue
+		}
+
+		for _, subnet := range subnets {
+			if subnet.Contains(ip) {
+				if !matched {
+					endpoint.MacAddress = iface.HardwareAddr
+					matched = true
+				}
+				setIPAddresses(endpoint, addr)
+				break // Break inner loop, continue checking other addresses
+			}
+		}
+	}
+	return matched
+}
+
+// populateEndpointFromNetNS finds and populates endpoint info from network namespace interfaces
+func populateEndpointFromNetNS(endpoint *EndpointResource, interfaces []native.NetInterface, subnets []*net.IPNet) {
+	for _, iface := range interfaces {
+		if !isUsableInterface(&iface) {
+			continue
+		}
+
+		if len(subnets) > 0 {
+			if matchInterfaceToSubnets(endpoint, &iface, subnets) {
+				return // Found matching interface
+			}
+			// Continue to next interface if this one doesn't match any subnets
+			continue
+		}
+
+		// Fallback: use first usable interface (for networks without explicit subnets)
+		endpoint.MacAddress = iface.HardwareAddr
+		for _, addr := range iface.Addrs {
+			setIPAddresses(endpoint, addr)
+		}
+		return
+	}
 }
 
 func NetworkFromNative(n *native.Network) (*Network, error) {
@@ -943,9 +1247,36 @@ func NetworkFromNative(n *native.Network) (*Network, error) {
 	}
 
 	res.Name = sCNI.Name
+	// An aux-address reservation splits one subnet into several sub-ranges that
+	// share the subnet and gateway. Collapse each distinct subnet into a single
+	// IPAM.Config like Docker, keeping the first entry's gateway and its lowest
+	// start. host-local returns a split subnet's sub-ranges sorted, so widening the
+	// end as later ones arrive rebuilds the original allocation window.
+	idxBySubnet := make(map[string]int)
+	startBySubnet := make(map[string]string)
 	for _, plugin := range sCNI.Plugins {
 		for _, ranges := range plugin.Ipam.Ranges {
-			res.IPAM.Config = append(res.IPAM.Config, ranges...)
+			for _, r := range ranges {
+				idx, ok := idxBySubnet[r.Subnet]
+				if !ok {
+					idx = len(res.IPAM.Config)
+					idxBySubnet[r.Subnet] = idx
+					startBySubnet[r.Subnet] = r.RangeStart
+					res.IPAM.Config = append(res.IPAM.Config, IPAMConfig{Subnet: r.Subnet, Gateway: r.Gateway})
+				}
+				// host-local has no ipRange field, so recompute it from the outermost
+				// bounds the way Docker reports it. A window that spans the whole
+				// subnet means no --ip-range was set, so report none. The
+				// aux-addresses themselves are attached later from a nerdctl label.
+				if r.RangeEnd == "" {
+					continue
+				}
+				ipRange := subnetutil.CIDRFromRange(startBySubnet[r.Subnet], r.RangeEnd)
+				if ipRange == r.Subnet {
+					ipRange = ""
+				}
+				res.IPAM.Config[idx].IPRange = ipRange
+			}
 		}
 	}
 
@@ -954,18 +1285,46 @@ func NetworkFromNative(n *native.Network) (*Network, error) {
 	}
 
 	if n.NerdctlLabels != nil {
-		res.Labels = *n.NerdctlLabels
+		// Reserved aux-addresses are stored in a nerdctl label (host-local has no
+		// field for them). Decode it, attach each subnet's pairs to its config so
+		// inspect reports AuxiliaryAddresses like Docker, and keep the internal
+		// label out of the user-visible label set.
+		res.Labels = make(map[string]string, len(*n.NerdctlLabels))
+		for k, v := range *n.NerdctlLabels {
+			if k == labels.NetworkAuxAddresses {
+				// A malformed value (the label is a user-settable nerdctl/ key) must
+				// not fail the whole inspect: log it and drop the label, leaving the
+				// config without AuxiliaryAddresses rather than erroring out.
+				var auxBySubnet map[string]map[string]string
+				if err := json.Unmarshal([]byte(v), &auxBySubnet); err != nil {
+					log.L.WithError(err).Warnf("ignoring malformed %s label", labels.NetworkAuxAddresses)
+					continue
+				}
+				for i := range res.IPAM.Config {
+					if aux, ok := auxBySubnet[res.IPAM.Config[i].Subnet]; ok {
+						res.IPAM.Config[i].AuxiliaryAddresses = aux
+					}
+				}
+				continue
+			}
+			res.Labels[k] = v
+		}
 	}
+
+	// Parse network subnets for interface matching
+	networkSubnets := parseNetworkSubnets(res.IPAM.Config)
 
 	res.Containers = make(map[string]EndpointResource)
 	for _, container := range n.Containers {
-		res.Containers[container.ID] = EndpointResource{
+		endpoint := EndpointResource{
 			Name: container.Labels[labels.Name],
-			// EndpointID:  container.EndpointID,
-			// MacAddress:  container.MacAddress,
-			// IPv4Address: container.IPv4Address,
-			// IPv6Address: container.IPv6Address,
 		}
+
+		if container.Process != nil && container.Process.NetNS != nil {
+			populateEndpointFromNetNS(&endpoint, container.Process.NetNS.Interfaces, networkSubnets)
+		}
+
+		res.Containers[container.ID] = endpoint
 	}
 
 	return &res, nil
@@ -993,79 +1352,4 @@ func ParseMountProperties(option []string) (rw bool, propagation string) {
 		}
 	}
 	return
-}
-
-func getDefaultLinuxBlkioSettings() LinuxBlkioSettings {
-	return LinuxBlkioSettings{
-		BlkioWeight:          0,
-		BlkioWeightDevice:    make([]*specs.LinuxWeightDevice, 0),
-		BlkioDeviceReadBps:   make([]*specs.LinuxThrottleDevice, 0),
-		BlkioDeviceWriteBps:  make([]*specs.LinuxThrottleDevice, 0),
-		BlkioDeviceReadIOps:  make([]*specs.LinuxThrottleDevice, 0),
-		BlkioDeviceWriteIOps: make([]*specs.LinuxThrottleDevice, 0),
-	}
-}
-
-func getBlkioSettingsFromSpec(spec *specs.Spec, hostConfig *HostConfig) error {
-	if spec == nil {
-		return fmt.Errorf("spec cannot be nil")
-	}
-	if hostConfig == nil {
-		return fmt.Errorf("hostConfig cannot be nil")
-	}
-
-	// Initialize empty arrays by default
-	hostConfig.LinuxBlkioSettings = getDefaultLinuxBlkioSettings()
-
-	if spec.Linux == nil || spec.Linux.Resources == nil || spec.Linux.Resources.BlockIO == nil {
-		return nil
-	}
-
-	blockIO := spec.Linux.Resources.BlockIO
-
-	// Set block IO weight
-	if blockIO.Weight != nil {
-		hostConfig.BlkioWeight = *blockIO.Weight
-	}
-
-	// Set weight devices
-	if len(blockIO.WeightDevice) > 0 {
-		hostConfig.BlkioWeightDevice = make([]*specs.LinuxWeightDevice, len(blockIO.WeightDevice))
-		for i, dev := range blockIO.WeightDevice {
-			hostConfig.BlkioWeightDevice[i] = &dev
-		}
-	}
-
-	// Set throttle devices for read BPS
-	if len(blockIO.ThrottleReadBpsDevice) > 0 {
-		hostConfig.BlkioDeviceReadBps = make([]*specs.LinuxThrottleDevice, len(blockIO.ThrottleReadBpsDevice))
-		for i, dev := range blockIO.ThrottleReadBpsDevice {
-			hostConfig.BlkioDeviceReadBps[i] = &dev
-		}
-	}
-
-	// Set throttle devices for write BPS
-	if len(blockIO.ThrottleWriteBpsDevice) > 0 {
-		hostConfig.BlkioDeviceWriteBps = make([]*specs.LinuxThrottleDevice, len(blockIO.ThrottleWriteBpsDevice))
-		for i, dev := range blockIO.ThrottleWriteBpsDevice {
-			hostConfig.BlkioDeviceWriteBps[i] = &dev
-		}
-	}
-
-	// Set throttle devices for read IOPs
-	if len(blockIO.ThrottleReadIOPSDevice) > 0 {
-		hostConfig.BlkioDeviceReadIOps = make([]*specs.LinuxThrottleDevice, len(blockIO.ThrottleReadIOPSDevice))
-		for i, dev := range blockIO.ThrottleReadIOPSDevice {
-			hostConfig.BlkioDeviceReadIOps[i] = &dev
-		}
-	}
-
-	// Set throttle devices for write IOPs
-	if len(blockIO.ThrottleWriteIOPSDevice) > 0 {
-		hostConfig.BlkioDeviceWriteIOps = make([]*specs.LinuxThrottleDevice, len(blockIO.ThrottleWriteIOPSDevice))
-		for i, dev := range blockIO.ThrottleWriteIOPSDevice {
-			hostConfig.BlkioDeviceWriteIOps[i] = &dev
-		}
-	}
-	return nil
 }

@@ -18,18 +18,29 @@ package serviceparser
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/compose-spec/compose-go/v2/types"
 	"gotest.tools/v3/assert"
 
+	"github.com/containerd/nerdctl/v2/pkg/internal/filesystem"
 	"github.com/containerd/nerdctl/v2/pkg/strutil"
 	"github.com/containerd/nerdctl/v2/pkg/testutil"
 )
+
+func getContainersFromService(t *testing.T, project *types.Project, svcName string) []Container {
+	t.Helper()
+	svcConfig, err := project.GetService(svcName)
+	assert.NilError(t, err)
+	svc, err := Parse(project, svcConfig)
+	assert.NilError(t, err)
+	return svc.Containers
+}
 
 func TestServicePortConfigToFlagP(t *testing.T) {
 	t.Parallel()
@@ -346,6 +357,7 @@ services:
       - /dev/a
       - /dev/b:/dev/b
       - /dev/c:/dev/c:rw
+      - vendor.com/class=name
 `
 	comp := testutil.NewComposeDir(t, dockerComposeYAML)
 	defer comp.CleanUp()
@@ -364,6 +376,34 @@ services:
 		assert.Assert(t, in(c.RunArgs, "--device=/dev/a:/dev/a:rwm"))
 		assert.Assert(t, in(c.RunArgs, "--device=/dev/b:/dev/b:rwm"))
 		assert.Assert(t, in(c.RunArgs, "--device=/dev/c:/dev/c:rw"))
+		assert.Assert(t, in(c.RunArgs, "--device=vendor.com/class=name"))
+	}
+}
+
+func TestParseCgroup(t *testing.T) {
+	const dockerComposeYAML = `
+services:
+  foo:
+    image: nginx:alpine
+    cgroup: host
+    cgroup_parent: foo.slice
+`
+	comp := testutil.NewComposeDir(t, dockerComposeYAML)
+	defer comp.CleanUp()
+
+	project, err := testutil.LoadProject(comp.YAMLFullPath(), comp.ProjectName(), nil)
+	assert.NilError(t, err)
+
+	fooSvc, err := project.GetService("foo")
+	assert.NilError(t, err)
+
+	foo, err := Parse(project, fooSvc)
+	assert.NilError(t, err)
+
+	t.Logf("foo: %+v", foo)
+	for _, c := range foo.Containers {
+		assert.Assert(t, in(c.RunArgs, "--cgroupns=host"))
+		assert.Assert(t, in(c.RunArgs, "--cgroup-parent=foo.slice"))
 	}
 }
 
@@ -436,6 +476,347 @@ services:
 	t.Logf("foo: %+v", foo)
 	for _, c := range foo.Containers {
 		assert.Assert(t, in(c.RunArgs, "-v=/src/dir1:/tgt/dir1:rshared,ro"))
+	}
+}
+
+func TestServiceVolumeConfigToImageMount(t *testing.T) {
+	t.Parallel()
+
+	target := "/website"
+	if runtime.GOOS == "windows" {
+		target = `C:\website`
+	}
+
+	testCases := []struct {
+		name    string
+		volume  types.ServiceVolumeConfig
+		want    string
+		wantErr string
+	}{
+		{
+			name: "whole image",
+			volume: types.ServiceVolumeConfig{
+				Type:   types.VolumeTypeImage,
+				Source: "nginx:alpine",
+				Target: target,
+			},
+			want: fmt.Sprintf("type=image,source=nginx:alpine,target=%s", target),
+		},
+		{
+			name: "explicit read only",
+			volume: types.ServiceVolumeConfig{
+				Type:     types.VolumeTypeImage,
+				Source:   "nginx:alpine",
+				Target:   target,
+				ReadOnly: true,
+			},
+			want: fmt.Sprintf("type=image,source=nginx:alpine,target=%s,readonly", target),
+		},
+		{
+			name: "missing source",
+			volume: types.ServiceVolumeConfig{
+				Type:   types.VolumeTypeImage,
+				Target: target,
+			},
+			wantErr: "image volume source is missing",
+		},
+		{
+			name: "missing target",
+			volume: types.ServiceVolumeConfig{
+				Type:   types.VolumeTypeImage,
+				Source: "nginx:alpine",
+			},
+			wantErr: "volume target is missing",
+		},
+		{
+			name: "relative target",
+			volume: types.ServiceVolumeConfig{
+				Type:   types.VolumeTypeImage,
+				Source: "nginx:alpine",
+				Target: "website",
+			},
+			wantErr: `volume target must be an absolute path, got "website"`,
+		},
+		{
+			name: "image subpath",
+			volume: types.ServiceVolumeConfig{
+				Type:   types.VolumeTypeImage,
+				Source: "nginx:alpine",
+				Target: target,
+				Image:  &types.ServiceVolumeImage{SubPath: "usr/share/nginx/html"},
+			},
+			wantErr: "image.subpath is not yet supported",
+		},
+		{
+			name: "bind options",
+			volume: types.ServiceVolumeConfig{
+				Type:   types.VolumeTypeImage,
+				Source: "nginx:alpine",
+				Target: target,
+				Bind:   &types.ServiceVolumeBind{},
+			},
+			wantErr: "image volume does not support bind options",
+		},
+		{
+			name: "volume options",
+			volume: types.ServiceVolumeConfig{
+				Type:   types.VolumeTypeImage,
+				Source: "nginx:alpine",
+				Target: target,
+				Volume: &types.ServiceVolumeVolume{},
+			},
+			wantErr: "image volume does not support volume options",
+		},
+		{
+			name: "tmpfs options",
+			volume: types.ServiceVolumeConfig{
+				Type:   types.VolumeTypeImage,
+				Source: "nginx:alpine",
+				Target: target,
+				Tmpfs:  &types.ServiceVolumeTmpfs{},
+			},
+			wantErr: "image volume does not support tmpfs options",
+		},
+		{
+			name: "consistency options",
+			volume: types.ServiceVolumeConfig{
+				Type:        types.VolumeTypeImage,
+				Source:      "nginx:alpine",
+				Target:      target,
+				Consistency: "cached",
+			},
+			wantErr: "image volume does not support consistency options",
+		},
+		{
+			name: "source containing comma",
+			volume: types.ServiceVolumeConfig{
+				Type:   types.VolumeTypeImage,
+				Source: "nginx:alpine,type=bind,source=/",
+				Target: target,
+			},
+			wantErr: "image volume source must not contain commas",
+		},
+		{
+			name: "target containing comma",
+			volume: types.ServiceVolumeConfig{
+				Type:   types.VolumeTypeImage,
+				Source: "nginx:alpine",
+				Target: target + ",type=bind,source=/,target=/host",
+			},
+			wantErr: "volume target must not contain commas",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := serviceVolumeConfigToImageMount(tc.volume)
+			if tc.wantErr != "" {
+				assert.ErrorContains(t, err, tc.wantErr)
+				return
+			}
+			assert.NilError(t, err)
+			assert.Equal(t, got, tc.want)
+		})
+	}
+}
+
+func TestParseImageVolume(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("test is not compatible with windows")
+	}
+
+	const dockerComposeYAML = `
+services:
+  foo:
+    image: alpine
+    volumes:
+      - type: image
+        source: nginx:alpine
+        target: /website
+`
+	comp := testutil.NewComposeDir(t, dockerComposeYAML)
+	defer comp.CleanUp()
+
+	project, err := testutil.LoadProject(comp.YAMLFullPath(), comp.ProjectName(), nil)
+	assert.NilError(t, err)
+
+	fooSvc, err := project.GetService("foo")
+	assert.NilError(t, err)
+
+	foo, err := Parse(project, fooSvc)
+	assert.NilError(t, err)
+	assert.Equal(t, len(foo.Containers), 1)
+	assert.Assert(t, in(foo.Containers[0].RunArgs, "--mount=type=image,source=nginx:alpine,target=/website"))
+	assert.Assert(t, !in(foo.Containers[0].RunArgs, "-v=nginx:alpine:/website"))
+}
+
+func TestParseImageVolumeServiceNameIsLiteral(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("test is not compatible with windows")
+	}
+
+	testCases := []struct {
+		name              string
+		referencedService types.ServiceConfig
+		disabled          bool
+	}{
+		{
+			name: "build service",
+			referencedService: types.ServiceConfig{
+				Name:          "builder",
+				ContainerSpec: types.ContainerSpec{Platform: "linux/amd64"},
+				WorkloadSpec:  types.WorkloadSpec{Build: &types.BuildConfig{}},
+			},
+		},
+		{
+			name: "explicit image",
+			referencedService: types.ServiceConfig{
+				Name: "builder",
+				ContainerSpec: types.ContainerSpec{
+					Image:    "nginx:alpine",
+					Platform: "linux/amd64",
+				},
+			},
+		},
+		{
+			name: "disabled explicit image service",
+			referencedService: types.ServiceConfig{
+				Name: "builder",
+				ContainerSpec: types.ContainerSpec{
+					Image:    "nginx:alpine",
+					Platform: "linux/amd64",
+				},
+			},
+			disabled: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			app := types.ServiceConfig{
+				Name: "app",
+				ContainerSpec: types.ContainerSpec{
+					Image:    "alpine",
+					Platform: "linux/arm64",
+					Volumes: []types.ServiceVolumeConfig{{
+						Type:   types.VolumeTypeImage,
+						Source: "builder",
+						Target: "/website",
+					}},
+				},
+			}
+			project := &types.Project{
+				Name:     "project",
+				Services: types.Services{"app": app},
+			}
+			if tc.disabled {
+				project.DisabledServices = types.Services{"builder": tc.referencedService}
+			} else {
+				project.Services["builder"] = tc.referencedService
+			}
+
+			parsed, err := Parse(project, app)
+			assert.NilError(t, err)
+			assert.Equal(t, parsed.Unparsed.Volumes[0].Source, "builder")
+			assert.DeepEqual(t, parsed.ImageMountSources, []ImageMountSource{{
+				Source:   "builder",
+				Platform: "linux/arm64",
+			}})
+			assert.Assert(t, in(parsed.Containers[0].RunArgs,
+				"--mount=type=image,source=builder,target=/website"))
+			assert.Equal(t, project.Services["app"].Volumes[0].Source, "builder")
+		})
+	}
+}
+
+func TestParseImageVolumePreservesOtherVolumeTypes(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("test is not compatible with windows")
+	}
+
+	const dockerComposeYAML = `
+services:
+  foo:
+    image: alpine
+    volumes:
+      - type: image
+        source: nginx:alpine
+        target: /website
+      - type: bind
+        source: /host
+        target: /bind
+      - type: volume
+        source: named
+        target: /named
+      - type: volume
+        target: /anonymous
+      - type: tmpfs
+        target: /tmpfs
+volumes:
+  named:
+`
+	comp := testutil.NewComposeDir(t, dockerComposeYAML)
+	defer comp.CleanUp()
+
+	project, err := testutil.LoadProject(comp.YAMLFullPath(), comp.ProjectName(), nil)
+	assert.NilError(t, err)
+
+	fooSvc, err := project.GetService("foo")
+	assert.NilError(t, err)
+
+	foo, err := Parse(project, fooSvc)
+	assert.NilError(t, err)
+	assert.Equal(t, len(foo.Containers), 1)
+	runArgs := foo.Containers[0].RunArgs
+	assert.Assert(t, in(runArgs, "--mount=type=image,source=nginx:alpine,target=/website"))
+	assert.Assert(t, in(runArgs, "-v=/host:/bind"))
+	assert.Assert(t, in(runArgs, fmt.Sprintf("-v=%s_named:/named", project.Name)))
+	assert.Assert(t, in(runArgs, "-v=/anonymous"))
+	assert.Assert(t, in(runArgs, "--tmpfs=/tmpfs"))
+}
+
+func TestTmpfsVolumeLongSyntax(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("test is not compatible with windows")
+	}
+
+	const dockerComposeYAML = `
+services:
+  foo:
+    image: nginx:alpine
+    volumes:
+      - type: tmpfs
+        target: /target
+        read_only: true
+        tmpfs:
+          size: 2G
+          mode: 0o1770
+`
+	comp := testutil.NewComposeDir(t, dockerComposeYAML)
+	defer comp.CleanUp()
+
+	project, err := testutil.LoadProject(comp.YAMLFullPath(), comp.ProjectName(), nil)
+	assert.NilError(t, err)
+
+	fooSvc, err := project.GetService("foo")
+	assert.NilError(t, err)
+
+	foo, err := Parse(project, fooSvc)
+	assert.NilError(t, err)
+
+	t.Logf("foo: %+v", foo)
+	for _, c := range foo.Containers {
+		assert.Assert(t, in(c.RunArgs, "--tmpfs=/target:ro,size=2147483648,mode=1770"))
 	}
 }
 
@@ -521,7 +902,7 @@ configs:
 	assert.NilError(t, err)
 
 	for _, f := range []string{"secret1", "secret2", "secret3", "config1", "config2"} {
-		err = os.WriteFile(filepath.Join(project.WorkingDir, f), []byte("content-"+f), 0444)
+		err = filesystem.WriteFile(filepath.Join(project.WorkingDir, f), []byte("content-"+f), 0444)
 		assert.NilError(t, err)
 	}
 
@@ -564,25 +945,72 @@ services:
 	project, err := testutil.LoadProject(comp.YAMLFullPath(), comp.ProjectName(), nil)
 	assert.NilError(t, err)
 
-	getContainersFromService := func(svcName string) []Container {
-		svcConfig, err := project.GetService(svcName)
-		assert.NilError(t, err)
-		svc, err := Parse(project, svcConfig)
-		assert.NilError(t, err)
-
-		return svc.Containers
-	}
-
 	var c Container
-	c = getContainersFromService("onfailure_no_count")[0]
+	c = getContainersFromService(t, project, "onfailure_no_count")[0]
 	assert.Assert(t, in(c.RunArgs, "--restart=on-failure"))
 
-	c = getContainersFromService("onfailure_with_count")[0]
+	c = getContainersFromService(t, project, "onfailure_with_count")[0]
 	assert.Assert(t, in(c.RunArgs, "--restart=on-failure:10"))
 
-	c = getContainersFromService("onfailure_ignore")[0]
+	c = getContainersFromService(t, project, "onfailure_ignore")[0]
 	assert.Assert(t, !in(c.RunArgs, "--restart=on-failure:3.14"))
 
-	c = getContainersFromService("unless_stopped")[0]
+	c = getContainersFromService(t, project, "unless_stopped")[0]
 	assert.Assert(t, in(c.RunArgs, "--restart=unless-stopped"))
+}
+
+func TestParseHealthCheck(t *testing.T) {
+	t.Parallel()
+	const dockerComposeYAML = `
+services:
+  cmd_shell:
+    image: alpine:3.14
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+  cmd_exec:
+    image: alpine:3.14
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost"]
+      interval: 1m
+  disabled_flag:
+    image: alpine:3.14
+    healthcheck:
+      disable: true
+      test: ["CMD", "curl", "-f", "http://localhost"]
+  disabled_none:
+    image: alpine:3.14
+    healthcheck:
+      test: ["NONE"]
+`
+	comp := testutil.NewComposeDir(t, dockerComposeYAML)
+	defer comp.CleanUp()
+
+	project, err := testutil.LoadProject(comp.YAMLFullPath(), comp.ProjectName(), nil)
+	assert.NilError(t, err)
+
+	var c Container
+
+	c = getContainersFromService(t, project, "cmd_shell")[0]
+	assert.Assert(t, in(c.RunArgs, "--health-cmd=curl -f http://localhost || exit 1"))
+	assert.Assert(t, in(c.RunArgs, "--health-interval=30s"))
+	assert.Assert(t, in(c.RunArgs, "--health-timeout=10s"))
+	assert.Assert(t, in(c.RunArgs, "--health-retries=3"))
+	assert.Assert(t, in(c.RunArgs, "--health-start-period=5s"))
+
+	c = getContainersFromService(t, project, "cmd_exec")[0]
+	assert.Assert(t, in(c.RunArgs, "--health-cmd=curl -f http://localhost"))
+	assert.Assert(t, in(c.RunArgs, "--health-interval=1m0s"))
+
+	c = getContainersFromService(t, project, "disabled_flag")[0]
+	assert.Assert(t, in(c.RunArgs, "--no-healthcheck"))
+	assert.Assert(t, !slices.ContainsFunc(c.RunArgs, func(s string) bool {
+		return strings.HasPrefix(s, "--health-cmd=")
+	}))
+
+	c = getContainersFromService(t, project, "disabled_none")[0]
+	assert.Assert(t, in(c.RunArgs, "--no-healthcheck"))
 }

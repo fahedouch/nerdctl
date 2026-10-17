@@ -28,7 +28,9 @@ readonly root
 # "Blacklisting" here means that any dependency which name is blacklisted will be left untouched, at the version
 # currently pinned in the Dockerfile.
 # This is convenient so that currently broken alpha/beta/RC can be held back temporarily to keep the build green
-blacklist=()
+# TODO: Blacklisting gotestsum until a new version compatible with golang v1.25rc1 is released
+# Issue: https://github.com/google/go-licenses/issues/312
+blacklist=(gotestsum)
 
 # List all the repositories we depend on to build and run integration tests
 dependencies=(
@@ -44,7 +46,6 @@ dependencies=(
   containernetworking/plugins
   rootless-containers/rootlesskit
   opencontainers/runc
-  rootless-containers/slirp4netns
   awslabs/soci-snapshotter
   containerd/stargz-snapshotter
   krallin/tini
@@ -63,7 +64,6 @@ FUSE_OVERLAYFS_CHECKSUM=linux
 # Avoids the full build
 BUILDG_CHECKSUM=buildg-v
 ROOTLESSKIT_CHECKSUM=linux
-SLIRP4NETNS_CHECKSUM=linux
 STARGZ_SNAPSHOTTER_CHECKSUM=linux
 # We specifically want the static ones
 TINI_CHECKSUM=static
@@ -160,15 +160,16 @@ latest::release(){
 
   while read -r line; do
     [ ! "$ignore" ] || ! grep -q "$ignore" <<<"$line" || continue
-    name="$(echo "$line"  | jq -rc .name)"
+    # Use tag_name as the canonical version identifier (name is an optional display label and may be empty)
+    name="$(echo "$line" | jq -rc 'if .name != "" then .name else .tag_name end')"
     if [ "$name" == "" ] || [ "$name" == null ] ; then
       log::debug " > bogus release name ($name) ignored"
       continue
     fi
     log::debug " > found release: $name"
-    if version::compare <(echo "$line" | jq -rc .name); then
+    if version::compare <(echo "$name"); then
       higher_data="$line"
-      higher_readable="$(echo "$line" | jq -rc .name | sed -E 's/(.*[ ])?(v?[0-9][0-9.a-z-]+).*/\2/')"
+      higher_readable="$(echo "$name" | sed -E 's/(.*[ ])?(v?[0-9][0-9.a-z-]+).*/\2/')"
     fi
   done < <(github::releases "$repo")
 
@@ -213,7 +214,7 @@ assets::get(){
 ######################
 
 canary::build::integration(){
-  docker_args=(docker build -t test-integration --target test-integration)
+  docker_args=(docker build -t test-integration-artifacts --target build-test-integration-artifacts)
 
   for dep in "${dependencies[@]}"; do
     local bl=""

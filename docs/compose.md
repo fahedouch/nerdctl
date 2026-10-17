@@ -25,12 +25,9 @@ which was derived from [Docker Compose file version 3 specification](https://doc
 - `services.<SERVICE>.credential_spec`
 - `services.<SERVICE>.deploy.update_config`
 - `services.<SERVICE>.deploy.rollback_config`
-- `services.<SERVICE>.deploy.resources.reservations`
 - `services.<SERVICE>.deploy.placement`
 - `services.<SERVICE>.deploy.endpoint_mode`
-- `services.<SERVICE>.healthcheck`
-- `services.<SERVICE>.stop_grace_period`
-- `services.<SERVICE>.stop_signal`
+- `services.<SERVICE>.healthcheck.start_interval`
 - `configs.<CONFIG>.external`
 - `secrets.<SECRET>.external`
 
@@ -42,3 +39,8 @@ which was derived from [Docker Compose file version 3 specification](https://doc
 - `uid`, `gid`: Cannot be specified. The default value is not propagated from `USER` instruction of Dockerfile.
   The file owner corresponds to the original file on the host.
 - `mode`: Cannot be specified. The file is mounted as read-only, with permission bits that correspond to the original file on the host.
+
+#### `services.<SERVICE>.volumes[].type: image`
+- Whole-image mounts are supported.
+- `source` is interpreted as an image reference, including when it matches a service name.
+- `services.<SERVICE>.volumes[].image.subpath` is not yet supported.

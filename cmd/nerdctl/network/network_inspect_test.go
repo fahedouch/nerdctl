@@ -19,22 +19,26 @@ package network
 import (
 	"encoding/json"
 	"errors"
+	"net"
 	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"gotest.tools/v3/assert"
 
 	"github.com/containerd/nerdctl/mod/tigron/expect"
 	"github.com/containerd/nerdctl/mod/tigron/require"
 	"github.com/containerd/nerdctl/mod/tigron/test"
+	"github.com/containerd/nerdctl/mod/tigron/tig"
 
 	"github.com/containerd/nerdctl/v2/pkg/inspecttypes/dockercompat"
 	"github.com/containerd/nerdctl/v2/pkg/testutil"
 	"github.com/containerd/nerdctl/v2/pkg/testutil/nerdtest"
 )
 
-func TestNetworkInspect(t *testing.T) {
+func TestNetworkInspectBasic(t *testing.T) {
 	testCase := nerdtest.Setup()
 
 	const (
@@ -42,15 +46,6 @@ func TestNetworkInspect(t *testing.T) {
 		testGateway = "10.24.24.1"
 		testIPRange = "10.24.24.0/25"
 	)
-
-	testCase.Setup = func(data test.Data, helpers test.Helpers) {
-		helpers.Ensure("network", "create", data.Identifier("basenet"))
-		data.Labels().Set("basenet", data.Identifier("basenet"))
-	}
-
-	testCase.Cleanup = func(data test.Data, helpers test.Helpers) {
-		helpers.Anyhow("network", "rm", data.Identifier("basenet"))
-	}
 
 	testCase.SubTests = []*test.Case{
 		{
@@ -67,25 +62,23 @@ func TestNetworkInspect(t *testing.T) {
 		},
 		{
 			Description: "none",
-			Require:     nerdtest.NerdctlNeedsFixing("no issue opened"),
 			Command:     test.Command("network", "inspect", "none"),
-			Expected: test.Expects(0, nil, func(stdout string, info string, t *testing.T) {
+			Expected: test.Expects(0, nil, func(stdout string, t tig.T) {
 				var dc []dockercompat.Network
 				err := json.Unmarshal([]byte(stdout), &dc)
-				assert.NilError(t, err, "Unable to unmarshal output\n"+info)
-				assert.Equal(t, 1, len(dc), "Unexpectedly got multiple results\n"+info)
+				assert.NilError(t, err, "Unable to unmarshal output\n")
+				assert.Equal(t, 1, len(dc), "Unexpectedly got multiple results\n")
 				assert.Equal(t, dc[0].Name, "none")
 			}),
 		},
 		{
 			Description: "host",
-			Require:     nerdtest.NerdctlNeedsFixing("no issue opened"),
 			Command:     test.Command("network", "inspect", "host"),
-			Expected: test.Expects(0, nil, func(stdout string, info string, t *testing.T) {
+			Expected: test.Expects(0, nil, func(stdout string, t tig.T) {
 				var dc []dockercompat.Network
 				err := json.Unmarshal([]byte(stdout), &dc)
-				assert.NilError(t, err, "Unable to unmarshal output\n"+info)
-				assert.Equal(t, 1, len(dc), "Unexpectedly got multiple results\n"+info)
+				assert.NilError(t, err, "Unable to unmarshal output\n")
+				assert.Equal(t, 1, len(dc), "Unexpectedly got multiple results\n")
 				assert.Equal(t, dc[0].Name, "host")
 			}),
 		},
@@ -93,11 +86,11 @@ func TestNetworkInspect(t *testing.T) {
 			Description: "bridge",
 			Require:     require.Not(require.Windows),
 			Command:     test.Command("network", "inspect", "bridge"),
-			Expected: test.Expects(0, nil, func(stdout string, info string, t *testing.T) {
+			Expected: test.Expects(0, nil, func(stdout string, t tig.T) {
 				var dc []dockercompat.Network
 				err := json.Unmarshal([]byte(stdout), &dc)
-				assert.NilError(t, err, "Unable to unmarshal output\n"+info)
-				assert.Equal(t, 1, len(dc), "Unexpectedly got multiple results\n"+info)
+				assert.NilError(t, err, "Unable to unmarshal output\n")
+				assert.Equal(t, 1, len(dc), "Unexpectedly got multiple results\n")
 				assert.Equal(t, dc[0].Name, "bridge")
 			}),
 		},
@@ -105,11 +98,11 @@ func TestNetworkInspect(t *testing.T) {
 			Description: "nat",
 			Require:     require.Windows,
 			Command:     test.Command("network", "inspect", "nat"),
-			Expected: test.Expects(0, nil, func(stdout string, info string, t *testing.T) {
+			Expected: test.Expects(0, nil, func(stdout string, t tig.T) {
 				var dc []dockercompat.Network
 				err := json.Unmarshal([]byte(stdout), &dc)
-				assert.NilError(t, err, "Unable to unmarshal output\n"+info)
-				assert.Equal(t, 1, len(dc), "Unexpectedly got multiple results\n"+info)
+				assert.NilError(t, err, "Unable to unmarshal output\n")
+				assert.Equal(t, 1, len(dc), "Unexpectedly got multiple results\n")
 				assert.Equal(t, dc[0].Name, "nat")
 			}),
 		},
@@ -122,14 +115,67 @@ func TestNetworkInspect(t *testing.T) {
 				helpers.Anyhow("network", "remove", "custom")
 			},
 			Command: test.Command("network", "inspect", "custom"),
-			Expected: test.Expects(0, nil, func(stdout string, info string, t *testing.T) {
+			Expected: test.Expects(0, nil, func(stdout string, t tig.T) {
 				var dc []dockercompat.Network
 				err := json.Unmarshal([]byte(stdout), &dc)
-				assert.NilError(t, err, "Unable to unmarshal output\n"+info)
-				assert.Equal(t, 1, len(dc), "Unexpectedly got multiple results\n"+info)
+				assert.NilError(t, err, "Unable to unmarshal output\n")
+				assert.Equal(t, 1, len(dc), "Unexpectedly got multiple results\n")
 				assert.Equal(t, dc[0].Name, "custom")
 			}),
 		},
+		{
+			Description: "basic",
+			// FIXME: IPAMConfig is not implemented on Windows yet
+			Require: require.Not(require.Windows),
+			Setup: func(data test.Data, helpers test.Helpers) {
+				helpers.Ensure("network", "create", "--label", "tag=testNetwork", "--subnet", testSubnet,
+					"--gateway", testGateway, "--ip-range", testIPRange, data.Identifier())
+			},
+			Cleanup: func(data test.Data, helpers test.Helpers) {
+				helpers.Anyhow("network", "rm", data.Identifier())
+			},
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				return helpers.Command("network", "inspect", data.Identifier())
+			},
+			Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
+				return &test.Expected{
+					ExitCode: 0,
+					Output: func(stdout string, t tig.T) {
+						var dc []dockercompat.Network
+
+						err := json.Unmarshal([]byte(stdout), &dc)
+						assert.NilError(t, err, "Unable to unmarshal output\n")
+						assert.Equal(t, 1, len(dc), "Unexpectedly got multiple results\n")
+						got := dc[0]
+
+						assert.Equal(t, got.Name, data.Identifier())
+						assert.Equal(t, got.Labels["tag"], "testNetwork")
+						assert.Equal(t, len(got.IPAM.Config), 1)
+						assert.Equal(t, got.IPAM.Config[0].Subnet, testSubnet)
+						assert.Equal(t, got.IPAM.Config[0].Gateway, testGateway)
+						assert.Equal(t, got.IPAM.Config[0].IPRange, testIPRange)
+					},
+				}
+			},
+		},
+	}
+
+	testCase.Run(t)
+}
+
+func TestNetworkInspectByID(t *testing.T) {
+	testCase := nerdtest.Setup()
+
+	testCase.Setup = func(data test.Data, helpers test.Helpers) {
+		helpers.Ensure("network", "create", data.Identifier("basenet"))
+		data.Labels().Set("basenet", data.Identifier("basenet"))
+	}
+
+	testCase.Cleanup = func(data test.Data, helpers test.Helpers) {
+		helpers.Anyhow("network", "rm", data.Identifier("basenet"))
+	}
+
+	testCase.SubTests = []*test.Case{
 		{
 			Description: "match exact id",
 			// See notes below
@@ -139,11 +185,11 @@ func TestNetworkInspect(t *testing.T) {
 			},
 			Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
 				return &test.Expected{
-					Output: func(stdout string, info string, t *testing.T) {
+					Output: func(stdout string, t tig.T) {
 						var dc []dockercompat.Network
 						err := json.Unmarshal([]byte(stdout), &dc)
-						assert.NilError(t, err, "Unable to unmarshal output\n"+info)
-						assert.Equal(t, 1, len(dc), "Unexpectedly got multiple results\n"+info)
+						assert.NilError(t, err, "Unable to unmarshal output\n")
+						assert.Equal(t, 1, len(dc), "Unexpectedly got multiple results\n")
 						assert.Equal(t, dc[0].Name, data.Labels().Get("basenet"))
 					},
 				}
@@ -160,11 +206,11 @@ func TestNetworkInspect(t *testing.T) {
 			},
 			Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
 				return &test.Expected{
-					Output: func(stdout string, info string, t *testing.T) {
+					Output: func(stdout string, t tig.T) {
 						var dc []dockercompat.Network
 						err := json.Unmarshal([]byte(stdout), &dc)
-						assert.NilError(t, err, "Unable to unmarshal output\n"+info)
-						assert.Equal(t, 1, len(dc), "Unexpectedly got multiple results\n"+info)
+						assert.NilError(t, err, "Unable to unmarshal output\n")
+						assert.Equal(t, 1, len(dc), "Unexpectedly got multiple results\n")
 						assert.Equal(t, dc[0].Name, data.Labels().Get("basenet"))
 					},
 				}
@@ -188,47 +234,12 @@ func TestNetworkInspect(t *testing.T) {
 			},
 			Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
 				return &test.Expected{
-					Output: func(stdout string, info string, t *testing.T) {
+					Output: func(stdout string, t tig.T) {
 						var dc []dockercompat.Network
 						err := json.Unmarshal([]byte(stdout), &dc)
-						assert.NilError(t, err, "Unable to unmarshal output\n"+info)
-						assert.Equal(t, 1, len(dc), "Unexpectedly got multiple results\n"+info)
+						assert.NilError(t, err, "Unable to unmarshal output\n")
+						assert.Equal(t, 1, len(dc), "Unexpectedly got multiple results\n")
 						assert.Equal(t, dc[0].Name, data.Labels().Get("netname"))
-					},
-				}
-			},
-		},
-		{
-			Description: "basic",
-			// FIXME: IPAMConfig is not implemented on Windows yet
-			Require: require.Not(require.Windows),
-			Setup: func(data test.Data, helpers test.Helpers) {
-				helpers.Ensure("network", "create", "--label", "tag=testNetwork", "--subnet", testSubnet,
-					"--gateway", testGateway, "--ip-range", testIPRange, data.Identifier())
-			},
-			Cleanup: func(data test.Data, helpers test.Helpers) {
-				helpers.Anyhow("network", "rm", data.Identifier())
-			},
-			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
-				return helpers.Command("network", "inspect", data.Identifier())
-			},
-			Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
-				return &test.Expected{
-					ExitCode: 0,
-					Output: func(stdout string, info string, t *testing.T) {
-						var dc []dockercompat.Network
-
-						err := json.Unmarshal([]byte(stdout), &dc)
-						assert.NilError(t, err, "Unable to unmarshal output\n"+info)
-						assert.Equal(t, 1, len(dc), "Unexpectedly got multiple results\n"+info)
-						got := dc[0]
-
-						assert.Equal(t, got.Name, data.Identifier(), info)
-						assert.Equal(t, got.Labels["tag"], "testNetwork", info)
-						assert.Equal(t, len(got.IPAM.Config), 1, info)
-						assert.Equal(t, got.IPAM.Config[0].Subnet, testSubnet, info)
-						assert.Equal(t, got.IPAM.Config[0].Gateway, testGateway, info)
-						assert.Equal(t, got.IPAM.Config[0].IPRange, testIPRange, info)
 					},
 				}
 			},
@@ -248,7 +259,7 @@ func TestNetworkInspect(t *testing.T) {
 			Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
 				return &test.Expected{
 					ExitCode: 0,
-					Output: func(stdout string, info string, t *testing.T) {
+					Output: func(stdout string, t tig.T) {
 						// Note: some functions need to be tested without the automatic --namespace nerdctl-test argument, so we need
 						// to retrieve the binary name.
 						// Note that we know this works already, so no need to assert err.
@@ -284,11 +295,27 @@ func TestNetworkInspect(t *testing.T) {
 				}
 			},
 		},
+	}
+
+	testCase.Run(t)
+}
+
+func TestNetworkInspectWithContainers(t *testing.T) {
+	testCase := nerdtest.Setup()
+
+	testCase.SubTests = []*test.Case{
 		{
 			Description: "Verify that only active containers appear in the network inspect output",
 			Setup: func(data test.Data, helpers test.Helpers) {
 				helpers.Ensure("network", "create", data.Identifier("nginx-network-1"))
 				helpers.Ensure("network", "create", data.Identifier("nginx-network-2"))
+
+				// See https://github.com/containerd/nerdctl/issues/4322
+				// Maybe network create on windows is asynchronous?
+				if runtime.GOOS == "windows" {
+					time.Sleep(time.Second)
+				}
+
 				helpers.Ensure("create", "--name", data.Identifier("nginx-container-1"), "--network", data.Identifier("nginx-network-1"), testutil.NginxAlpineImage)
 				helpers.Ensure("create", "--name", data.Identifier("nginx-container-2"), "--network", data.Identifier("nginx-network-1"), testutil.NginxAlpineImage)
 				helpers.Ensure("create", "--name", data.Identifier("nginx-container-on-diff-network"), "--network", data.Identifier("nginx-network-2"), testutil.NginxAlpineImage)
@@ -307,15 +334,251 @@ func TestNetworkInspect(t *testing.T) {
 			},
 			Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
 				return &test.Expected{
-					Output: func(stdout string, info string, t *testing.T) {
+					Output: func(stdout string, t tig.T) {
 						var dc []dockercompat.Network
 						err := json.Unmarshal([]byte(stdout), &dc)
-						assert.NilError(t, err, "Unable to unmarshal output\n"+info)
-						assert.Equal(t, 1, len(dc), "Unexpectedly got multiple results\n"+info)
+						assert.NilError(t, err, "Unable to unmarshal output\n")
+						assert.Equal(t, 1, len(dc), "Unexpectedly got multiple results\n")
 						assert.Equal(t, dc[0].Name, data.Identifier("nginx-network-1"))
 						// Assert only the "running" containers on the same network are returned.
 						assert.Equal(t, 1, len(dc[0].Containers), "Expected a single container as per configuration, but got multiple.")
 						assert.Equal(t, data.Identifier("nginx-container-1"), dc[0].Containers[data.Labels().Get("nginx-container-1-id")].Name)
+					},
+				}
+			},
+		},
+		{
+			Description: "Display containers belonging to multiple networks in the output of nerdctl network inspect",
+			Setup: func(data test.Data, helpers test.Helpers) {
+				helpers.Ensure("network", "create", data.Identifier("network-1"))
+				helpers.Ensure("network", "create", data.Identifier("network-2"))
+
+				// See https://github.com/containerd/nerdctl/issues/4322
+				// Maybe network create on windows is asynchronous?
+				if runtime.GOOS == "windows" {
+					time.Sleep(time.Second)
+				}
+
+				containerID := helpers.Capture("run", "-d", "--name", data.Identifier(), "--network", data.Identifier("network-1"), "--network", data.Identifier("network-2"), testutil.CommonImage, "sleep", nerdtest.Infinity)
+
+				data.Labels().Set("containerID", strings.Trim(containerID, "\n"))
+			},
+			Cleanup: func(data test.Data, helpers test.Helpers) {
+				helpers.Anyhow("rm", "-f", data.Identifier())
+				helpers.Anyhow("network", "remove", data.Identifier("network-1"))
+				helpers.Anyhow("network", "remove", data.Identifier("network-2"))
+			},
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				return helpers.Command("network", "inspect", data.Identifier("network-1"))
+			},
+			Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
+				return &test.Expected{
+					Output: expect.JSON([]dockercompat.Network{}, func(dc []dockercompat.Network, t tig.T) {
+						assert.Equal(t, 1, len(dc), "Unexpectedly got multiple results\n")
+						assert.Equal(t, dc[0].Name, data.Identifier("network-1"))
+						assert.Equal(t, 1, len(dc[0].Containers), "Expected a single container as per configuration, but got multiple.")
+						assert.Equal(t, data.Identifier(), dc[0].Containers[data.Labels().Get("containerID")].Name)
+					}),
+				}
+			},
+		},
+		{
+			Description: "Display only containers attached to the specific network",
+			Setup: func(data test.Data, helpers test.Helpers) {
+				helpers.Ensure("network", "create", data.Identifier("some-network"))
+				helpers.Ensure("network", "create", data.Identifier("some-network-as-well"))
+
+				// See https://github.com/containerd/nerdctl/issues/4322
+				// Maybe network create on windows is asynchronous?
+				if runtime.GOOS == "windows" {
+					time.Sleep(time.Second)
+				}
+
+				helpers.Ensure("run", "-d", "--name", data.Identifier(), "--network", data.Identifier("some-network-as-well"), testutil.CommonImage, "sleep", nerdtest.Infinity)
+			},
+			Cleanup: func(data test.Data, helpers test.Helpers) {
+				helpers.Anyhow("rm", "-f", data.Identifier())
+				helpers.Anyhow("network", "remove", data.Identifier("some-network"))
+				helpers.Anyhow("network", "remove", data.Identifier("some-network-as-well"))
+			},
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				return helpers.Command("network", "inspect", data.Identifier("some-network"))
+			},
+			Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
+				return &test.Expected{
+					Output: expect.JSON([]dockercompat.Network{}, func(dc []dockercompat.Network, t tig.T) {
+						assert.Equal(t, 1, len(dc), "Unexpectedly got multiple results\n")
+						assert.Equal(t, dc[0].Name, data.Identifier("some-network"))
+						assert.Equal(t, 0, len(dc[0].Containers), "Expected no containers as per configuration, but got multiple.")
+					}),
+				}
+			},
+		},
+		{
+			Description: "Test container network details",
+			Setup: func(data test.Data, helpers test.Helpers) {
+				helpers.Ensure("network", "create", data.Identifier("test-network"))
+
+				// See https://github.com/containerd/nerdctl/issues/4322
+				if runtime.GOOS == "windows" {
+					time.Sleep(time.Second)
+				}
+
+				// Create and start a container on this network
+				helpers.Ensure("run", "-d", "--name", data.Identifier("test-container"),
+					"--network", data.Identifier("test-network"),
+					testutil.CommonImage, "sleep", nerdtest.Infinity)
+
+				// Get container ID for later use
+				containerID := strings.Trim(helpers.Capture("inspect", data.Identifier("test-container"), "--format", "{{.Id}}"), "\n")
+				data.Labels().Set("containerID", containerID)
+			},
+			Cleanup: func(data test.Data, helpers test.Helpers) {
+				helpers.Anyhow("rm", "-f", data.Identifier("test-container"))
+				helpers.Anyhow("network", "remove", data.Identifier("test-network"))
+			},
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				return helpers.Command("network", "inspect", data.Identifier("test-network"))
+			},
+			Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
+				return &test.Expected{
+					Output: func(stdout string, t tig.T) {
+						var dc []dockercompat.Network
+						err := json.Unmarshal([]byte(stdout), &dc)
+						assert.NilError(t, err, "Unable to unmarshal output")
+						assert.Equal(t, 1, len(dc), "Expected exactly one network")
+
+						network := dc[0]
+						assert.Equal(t, network.Name, data.Identifier("test-network"))
+						assert.Equal(t, 1, len(network.Containers), "Expected exactly one container")
+
+						// Get the container details
+						containerID := data.Labels().Get("containerID")
+						container := network.Containers[containerID]
+
+						// Test container name
+						assert.Equal(t, container.Name, data.Identifier("test-container"))
+
+						// Windows InspectNetNS is not implemented
+						if runtime.GOOS != "windows" {
+							// Verify IPv4Address is not empty and has CIDR notation
+							assert.Assert(t, container.IPv4Address != "", "IPv4Address should not be empty")
+							assert.Assert(t, strings.Contains(container.IPv4Address, "/"), "IPv4Address should contain CIDR notation with /")
+
+							// Verify IPv4Address is within the network's subnet
+							if len(network.IPAM.Config) > 0 && network.IPAM.Config[0].Subnet != "" {
+								_, subnet, err := net.ParseCIDR(network.IPAM.Config[0].Subnet)
+								assert.NilError(t, err, "Failed to parse network subnet")
+
+								containerIP, _, err := net.ParseCIDR(container.IPv4Address)
+								assert.NilError(t, err, "Failed to parse container IPv4Address")
+								assert.Assert(t, subnet.Contains(containerIP), "IPv4Address should be within the network's subnet")
+							}
+
+							// Test MacAddress is present and has valid format
+							assert.Assert(t, container.MacAddress != "", "MacAddress should not be empty")
+
+							// Test IPv6Address is empty for IPv4-only network
+							assert.Equal(t, "", container.IPv6Address, "IPv6Address should be empty for IPv4-only network")
+						}
+					},
+				}
+			},
+		},
+	}
+
+	testCase.Run(t)
+}
+
+func TestNetworkInspectDualStack(t *testing.T) {
+	testCase := nerdtest.Setup()
+
+	testCase.SubTests = []*test.Case{
+		{
+			Description: "Test dual-stack network with both IPv4 and IPv6",
+			Require:     require.Not(require.Windows), // NetNS not implemented on Windows
+			Setup: func(data test.Data, helpers test.Helpers) {
+				helpers.Ensure("network", "create",
+					"--ipv6",
+					// Not 10.1.0.0/24: the eth0 of the GitHub Actions runners lives in
+					// 10.1.0.0/20, which the subnet overlap check rejects
+					"--subnet", "10.24.0.0/24",
+					"--subnet", "fd00::/64",
+					data.Identifier("test-dual-stack"))
+
+				// See https://github.com/containerd/nerdctl/issues/4322
+				if runtime.GOOS == "windows" {
+					time.Sleep(time.Second)
+				}
+
+				// Create and start a container on this dual-stack network
+				helpers.Ensure("run", "-d",
+					"--name", data.Identifier("test-container"),
+					"--network", data.Identifier("test-dual-stack"),
+					testutil.CommonImage, "sleep", nerdtest.Infinity)
+
+				// Get container ID for later use
+				containerID := strings.Trim(helpers.Capture("inspect", data.Identifier("test-container"), "--format", "{{.Id}}"), "\n")
+				data.Labels().Set("containerID", containerID)
+			},
+			Cleanup: func(data test.Data, helpers test.Helpers) {
+				helpers.Anyhow("rm", "-f", data.Identifier("test-container"))
+				helpers.Anyhow("network", "remove", data.Identifier("test-dual-stack"))
+			},
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				return helpers.Command("network", "inspect", data.Identifier("test-dual-stack"))
+			},
+			Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
+				return &test.Expected{
+					Output: func(stdout string, t tig.T) {
+						var dc []dockercompat.Network
+						err := json.Unmarshal([]byte(stdout), &dc)
+						assert.NilError(t, err, "Unable to unmarshal output")
+						assert.Equal(t, 1, len(dc), "Expected exactly one network")
+
+						network := dc[0]
+						assert.Equal(t, network.Name, data.Identifier("test-dual-stack"))
+						assert.Equal(t, 2, len(network.IPAM.Config), "Expected two subnets (IPv4 and IPv6)")
+
+						// Get the container details
+						containerID := data.Labels().Get("containerID")
+						container := network.Containers[containerID]
+
+						// Test container name
+						assert.Equal(t, container.Name, data.Identifier("test-container"))
+
+						// Parse both subnets
+						var ipv4Subnet, ipv6Subnet *net.IPNet
+						for _, config := range network.IPAM.Config {
+							if config.Subnet != "" {
+								_, subnet, err := net.ParseCIDR(config.Subnet)
+								assert.NilError(t, err, "Failed to parse subnet")
+								if subnet.IP.To4() != nil {
+									ipv4Subnet = subnet
+								} else {
+									ipv6Subnet = subnet
+								}
+							}
+						}
+
+						// Verify IPv4 address is present and within subnet
+						assert.Assert(t, container.IPv4Address != "", "IPv4Address should not be empty in dual-stack network")
+						ipv4, _, err := net.ParseCIDR(container.IPv4Address)
+						assert.NilError(t, err, "Failed to parse IPv4Address")
+						if ipv4Subnet != nil {
+							assert.Assert(t, ipv4Subnet.Contains(ipv4), "IPv4 address should be within the IPv4 subnet")
+						}
+
+						// Verify IPv6 address is present and within subnet
+						assert.Assert(t, container.IPv6Address != "", "IPv6Address should not be empty in dual-stack network")
+						ipv6, _, err := net.ParseCIDR(container.IPv6Address)
+						assert.NilError(t, err, "Failed to parse IPv6Address")
+						if ipv6Subnet != nil {
+							assert.Assert(t, ipv6Subnet.Contains(ipv6), "IPv6 address should be within the IPv6 subnet")
+						}
+
+						// Verify MAC address is present
+						assert.Assert(t, container.MacAddress != "", "MacAddress should not be empty")
 					},
 				}
 			},

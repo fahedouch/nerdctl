@@ -24,6 +24,26 @@ readonly root
 
 GITHUB_STEP_SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/null}"
 
+# The classification of the tests, and everything the flaky test dashboard needs, live in the
+# reusable module: see mod/soigneur/README.md and docs/testing/flaky.md.
+# - "failing": the test never passed, even on retry (either consistently broken, or not retried).
+# - "flaky": the test did pass on retry, so it is flaky beyond a doubt.
+# flaky-annotate.sh prints both lists to stdout, so that they stay visible at the end of the job
+# log, writes the marker lines that the dashboard is collected from, and emits the matching
+# annotations for the pull request. The lists come back through SOIGNEUR_FAILING_OUT and
+# SOIGNEUR_SOIGNEUR_OUT, for the step summary below.
+readonly soigneur="$root"/../../mod/soigneur
+
+lists="$(mktemp -d)"
+# shellcheck disable=SC2064
+trap "rm -rf '$lists'" EXIT
+
+SOIGNEUR_FAILING_OUT="$lists"/failing SOIGNEUR_SOIGNEUR_OUT="$lists"/flaky \
+  "$soigneur"/flaky-annotate.sh "$GOTESTSUM_JSONFILE"
+
+failing_tests="$(cat "$lists"/failing)"
+flaky_tests="$(cat "$lists"/flaky)"
+
 {
   github::md::h3 "Total number of tests: $TESTS_TOTAL"
   github::md::pie "Status" "Skipped" "$TESTS_SKIPPED" "Failed" "$TESTS_FAILED" "Passed" "$(( TESTS_TOTAL - TESTS_FAILED - TESTS_SKIPPED ))"
@@ -34,7 +54,12 @@ GITHUB_STEP_SUMMARY="${GITHUB_STEP_SUMMARY:-/dev/null}"
 
   github::md::h3 "Failing tests"
   echo '```'
-  jq -rc 'select(.Action == "fail") | select(.Test) | .Test' < "$GOTESTSUM_JSONFILE"
+  echo "${failing_tests:-}"
+  echo '```'
+
+  github::md::h3 "Flaky tests (failed, then passed on retry)"
+  echo '```'
+  echo "${flaky_tests:-}"
   echo '```'
 
   github::md::h3 "Tests taking more than 15 seconds"

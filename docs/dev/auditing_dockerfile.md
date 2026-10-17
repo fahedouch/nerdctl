@@ -34,7 +34,7 @@ is the local ip of the Charles proxy (non-localhost)
 
 Add the following stages in the dockerfile:
 ```dockerfile
-FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-bookworm AS hack-build-base-debian
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-trixie AS hack-build-base-debian
 RUN apt-get update -qq; apt-get -qq install ca-certificates
 COPY charles-ssl-proxying-certificate.crt /usr/local/share/ca-certificates/
 RUN update-ca-certificates
@@ -52,7 +52,7 @@ RUN update-ca-certificates
 
 Then replace any later "FROM" with our modified bases:
 ```
-golang:${GO_VERSION}-bookworm => hack-build-base-debian
+golang:${GO_VERSION}-trixie => hack-build-base-debian
 golang:${GO_VERSION}-alpine => hack-build-base
 ubuntu:${UBUNTU_VERSION} => hack-base
 ```
@@ -103,9 +103,7 @@ ci_run(){
   local no_cache="${1:-}"
   export UBUNTU_VERSION=24.04
 
-  CONTAINERD_VERSION=v1.6.36 run "$no_cache" arm64 Dockerfile.origin build-dependencies
-  UBUNTU_VERSION=20.04 CONTAINERD_VERSION=v1.6.36 run "" arm64 Dockerfile.origin test-integration
-
+  # The actual version may differ
   CONTAINERD_VERSION=v1.7.25 run "$no_cache"  arm64 Dockerfile.origin build-dependencies
   UBUNTU_VERSION=22.04 CONTAINERD_VERSION=v1.7.25 run "" arm64 Dockerfile.origin test-integration
 
@@ -255,7 +253,7 @@ On a warm cache, it is still over 150MB and 30+ seconds.
 In and of itself, this is hard to reduce, as we need these...
 
 Actions:
-- [ ] we could cache the module download location to reduce round-trips on modules that are shared accross
+- [ ] we could cache the module download location to reduce round-trips on modules that are shared across
 different projects
 - [ ] we are likely installing nerdctl modules six times - (once per architecture during the build phase, then once per
 ubuntu version and architecture during the tests runs (this is not even accounted for in the audit above)) - it should

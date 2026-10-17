@@ -35,6 +35,7 @@ Files:
 - `<CID>-json.log`: used by `nerdctl logs`
 - `oci-hook.*.log`: logs of the OCI hook
 - `lifecycle.json`: used to store stateful information about the container that can only be retrieved through OCI hooks
+- `network-config.json`: used to store container-specific network configuration, such as port mappings.
 
 ### `<DATAROOT>/<ADDRHASH>/names/<NAMESPACE>`
 e.g. `/var/lib/nerdctl/1935db59/names/default`
@@ -65,9 +66,16 @@ Data volume
 
 Can be overridden with `nerdctl --cni-netconfpath=<NETCONFPATH>` flag and environment variable `$NETCONFPATH`.
 
-At the top-level of <NETCONFPATH>, network (files) are shared accross all namespaces.
+At the top-level of <NETCONFPATH>, network (files) are shared across all namespaces.
 Sub-folders inside <NETCONFPATH> are only available to the namespace bearing the same name,
 and its networks definitions are private.
 
 Files:
 - `nerdctl-<NWNAME>.conflist`: CNI conf list created by nerdctl
+
+## Cache
+
+### `<XDG_CACHE_HOME>/.nerdctl/oci-runtime-features/<RUNTIMEPATHHASH>.json`
+e.g., `~/.cache/nerdctl/oci-runtime-features/67865418f7d73228cb3df1357ba93456ab21567f3c1f1b5eca680b0b8cfbc04e.json`
+
+A cached result of `<RUNTIME> features` (e.g., `runc features`).

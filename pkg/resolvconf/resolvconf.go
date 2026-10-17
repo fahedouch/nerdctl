@@ -36,6 +36,8 @@ import (
 	"sync"
 
 	"github.com/containerd/log"
+
+	"github.com/containerd/nerdctl/v2/pkg/internal/filesystem"
 )
 
 const (
@@ -70,7 +72,7 @@ var (
 // More information at https://www.freedesktop.org/software/systemd/man/systemd-resolved.service.html#/etc/resolv.conf
 func Path() string {
 	detectSystemdResolvConfOnce.Do(func() {
-		candidateResolvConf, err := os.ReadFile(defaultPath)
+		candidateResolvConf, err := filesystem.ReadFile(defaultPath)
 		if err != nil {
 			// silencing error as it will resurface at next calls trying to read defaultPath
 			return
@@ -112,12 +114,6 @@ var (
 	optionsRegexp     = regexp.MustCompile(`^\s*options\s*(([^\s]+\s*)*)$`)
 )
 
-var lastModified struct {
-	sync.Mutex
-	sha256   string
-	contents []byte
-}
-
 // File contains the resolv.conf content and its hash
 type File struct {
 	Content []byte
@@ -131,7 +127,7 @@ func Get() (*File, error) {
 
 // GetSpecific returns the contents of the user specified resolv.conf file and its hash
 func GetSpecific(path string) (*File, error) {
-	resolv, err := os.ReadFile(path)
+	resolv, err := filesystem.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
@@ -142,39 +138,6 @@ func GetSpecific(path string) (*File, error) {
 	return &File{Content: resolv, Hash: hash}, nil
 }
 
-// GetIfChanged retrieves the host /etc/resolv.conf file, checks against the last hash
-// and, if modified since last check, returns the bytes and new hash.
-// This feature is used by the resolv.conf updater for containers
-func GetIfChanged() (*File, error) {
-	lastModified.Lock()
-	defer lastModified.Unlock()
-
-	resolv, err := os.ReadFile(Path())
-	if err != nil {
-		return nil, err
-	}
-	newHash, err := hashData(bytes.NewReader(resolv))
-	if err != nil {
-		return nil, err
-	}
-	if lastModified.sha256 != newHash {
-		lastModified.sha256 = newHash
-		lastModified.contents = resolv
-		return &File{Content: resolv, Hash: newHash}, nil
-	}
-	// nothing changed, so return no data
-	return nil, nil
-}
-
-// GetLastModified retrieves the last used contents and hash of the host resolv.conf.
-// Used by containers updating on restart
-func GetLastModified() *File {
-	lastModified.Lock()
-	defer lastModified.Unlock()
-
-	return &File{Content: lastModified.contents, Hash: lastModified.sha256}
-}
-
 // FilterResolvDNS cleans up the config in resolvConf.  It has two main jobs:
 //  1. It looks for localhost (127.*|::1) entries in the provided
 //     resolv.conf, removing local nameserver entries, and, if the resulting
@@ -182,7 +145,23 @@ func GetLastModified() *File {
 //  2. Given the caller provides the enable/disable state of IPv6, the filter
 //     code will remove all IPv6 nameservers if it is not enabled for containers
 func FilterResolvDNS(resolvConf []byte, ipv6Enabled bool) (*File, error) {
-	cleanedResolvConf := localhostNSRegexp.ReplaceAll(resolvConf, []byte{})
+	return FilterResolvDNSWithLocalhostOption(resolvConf, ipv6Enabled, false)
+}
+
+// FilterResolvDNSWithLocalhostOption is like FilterResolvDNS but allows controlling
+// whether localhost nameservers are preserved. This is useful for host network mode
+// where the container should inherit the host's DNS configuration including localhost resolvers.
+//
+// Parameters:
+//   - resolvConf: the resolv.conf file content
+//   - ipv6Enabled: whether IPv6 nameservers should be preserved
+//   - allowLocalhostDNS: if true, localhost nameservers are preserved; if false, they are filtered out
+func FilterResolvDNSWithLocalhostOption(resolvConf []byte, ipv6Enabled bool, allowLocalhostDNS bool) (*File, error) {
+	cleanedResolvConf := resolvConf
+	// if allowLocalhostDNS is false, remove localhost nameservers
+	if !allowLocalhostDNS {
+		cleanedResolvConf = localhostNSRegexp.ReplaceAll(cleanedResolvConf, []byte{})
+	}
 	// if IPv6 is not enabled, also clean out any IPv6 address nameserver
 	if !ipv6Enabled {
 		cleanedResolvConf = nsIPv6Regexp.ReplaceAll(cleanedResolvConf, []byte{})
@@ -317,12 +296,12 @@ func Build(path string, dns, dnsSearch, dnsOptions []string) (*File, error) {
 		return nil, err
 	}
 
-	err = os.WriteFile(path, content.Bytes(), 0o644)
+	err = filesystem.WriteFile(path, content.Bytes(), 0o644)
 	if err != nil {
 		return nil, err
 	}
 
-	// os.WriteFile relies on syscall.Open. Unless there are ACLs, the effective mode of the file will be matched
+	// WriteFile relies on syscall.Open. Unless there are ACLs, the effective mode of the file will be matched
 	// against the current process umask.
 	// See https://www.man7.org/linux/man-pages/man2/open.2.html for details.
 	// Since we must make sure that these files are world readable, explicitly chmod them here.

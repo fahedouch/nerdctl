@@ -35,12 +35,15 @@ jobs:
 
     steps:
       - name: "Init: checkout"
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683  # v4.2.2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           fetch-depth: 1
+          persist-credentials: false
 
       - if: ${{ inputs.canary }}
         name: "Init (canary): retrieve GO_VERSION"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           . ./hack/github/action-helpers.sh
           latest_go="$(. ./hack/provisioning/version/fetch.sh; go::canary::for::go-setup)"
@@ -50,7 +53,7 @@ jobs:
 
       - if: ${{ env.GO_VERSION != '' }}
         name: "Init: install go"
-        uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5  # v5.5.0
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
         with:
           go-version: ${{ env.GO_VERSION }}
           check-latest: true
@@ -70,6 +73,8 @@ jobs:
             local goarm="${3:-}"
             local result
 
+            GOOS="$goos" GOARCH="$goarch" GOARM="$goarm" go build ./examples/...
+
             github::timer::begin
 
             GOOS="$goos" GOARCH="$goarch" GOARM="$goarm" make binaries \
@@ -88,11 +93,21 @@ jobs:
           build linux arm64
           build windows
           build freebsd
+          # These architectures are not released, but we still verify that we can at least compile
           build darwin
           build linux arm 6
-          # These architectures are not released, but we still verify that we can at least compile
+          build linux loong64
           build linux ppc64le
           build linux riscv64
           build linux s390x
 
           [ ! "$failure" ] || exit 1
+
+      - if: ${{ env.GO_VERSION != '' }}
+        name: "Run: make binaries with custom BUILDTAGS"
+        run: |
+          set -eux
+          # no_ipfs: make sure it does not incur any IPFS-related dependency
+          go mod vendor
+          rm -rf vendor/github.com/ipfs vendor/github.com/multiformats
+          BUILDTAGS=no_ipfs make binaries

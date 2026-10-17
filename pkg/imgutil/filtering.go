@@ -63,7 +63,7 @@ type Filter func([]images.Image) ([]images.Image, error)
 func ParseFilters(filters []string) (*Filters, error) {
 	f := &Filters{Labels: make(map[string]string)}
 	for _, filter := range filters {
-		tempFilterToken := strings.Split(filter, "=")
+		tempFilterToken := strings.SplitN(filter, "=", 3)
 		switch len(tempFilterToken) {
 		case 1:
 			return nil, fmt.Errorf("invalid filter %q", filter)
@@ -323,8 +323,11 @@ func matchesAllLabels(imageCfgLabels map[string]string, filterLabels map[string]
 func matchesReferences(image images.Image, referencePatterns []string) (bool, error) {
 	var matches int
 
-	// Containerd returns ":" for dangling untagged images - see https://github.com/containerd/nerdctl/issues/3852
-	if image.Name == ":" {
+	// Dangling untagged images are named ":" or ":<digest>" (see
+	// https://github.com/containerd/nerdctl/issues/3852 and
+	// https://github.com/containerd/nerdctl/issues/4109), neither of which is a
+	// parsable reference.
+	if strings.HasPrefix(image.Name, ":") {
 		return false, nil
 	}
 

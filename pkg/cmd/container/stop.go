@@ -25,7 +25,9 @@ import (
 
 	"github.com/containerd/nerdctl/v2/pkg/api/types"
 	"github.com/containerd/nerdctl/v2/pkg/containerutil"
+	"github.com/containerd/nerdctl/v2/pkg/healthcheck"
 	"github.com/containerd/nerdctl/v2/pkg/idutil/containerwalker"
+	"github.com/containerd/nerdctl/v2/pkg/ocihook"
 )
 
 // Stop stops a list of containers specified by `reqs`.
@@ -39,12 +41,18 @@ func Stop(ctx context.Context, client *containerd.Client, reqs []string, opt typ
 			if err := cleanupNetwork(ctx, found.Container, opt.GOptions); err != nil {
 				return fmt.Errorf("unable to cleanup network for container: %s", found.Req)
 			}
+			if err := healthcheck.RemoveTransientHealthCheckFiles(ctx, found.Container); err != nil {
+				return fmt.Errorf("unable to cleanup healthcheck timer for container: %s: %w", found.Req, err)
+			}
 			if err := containerutil.Stop(ctx, found.Container, opt.Timeout, opt.Signal); err != nil {
 				if errdefs.IsNotFound(err) {
 					fmt.Fprintf(opt.Stderr, "No such container: %s\n", found.Req)
 					return nil
 				}
 				return err
+			}
+			if err := ocihook.CleanupPortReserverProcess(opt.GOptions.Namespace, found.Container.ID()); err != nil {
+				return fmt.Errorf("unable to cleanup port reserver process for container: %s: %w", found.Req, err)
 			}
 			_, err := fmt.Fprintln(opt.Stdout, found.Req)
 			return err

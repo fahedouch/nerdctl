@@ -41,6 +41,7 @@ import (
 	"github.com/containerd/nerdctl/v2/pkg/buildkitutil"
 	"github.com/containerd/nerdctl/v2/pkg/clientutil"
 	"github.com/containerd/nerdctl/v2/pkg/containerutil"
+	"github.com/containerd/nerdctl/v2/pkg/internal/filesystem"
 	"github.com/containerd/nerdctl/v2/pkg/platformutil"
 	"github.com/containerd/nerdctl/v2/pkg/referenceutil"
 	"github.com/containerd/nerdctl/v2/pkg/strutil"
@@ -105,13 +106,29 @@ func Build(ctx context.Context, client *containerd.Client, options types.Builder
 		return err
 	}
 
-	if options.IidFile != "" {
+	if metaFile != "" {
 		id, err := getDigestFromMetaFile(metaFile)
 		if err != nil {
-			return err
-		}
-		if err := os.WriteFile(options.IidFile, []byte(id), 0644); err != nil {
-			return err
+			// A missing digest is fatal when the user explicitly asked for an iidfile, but not
+			// in quiet mode: the requested output may legitimately have no image digest
+			// (e.g. `--output type=local`).
+			if options.IidFile != "" {
+				return err
+			}
+			log.L.WithError(err).Debug("failed to get the image digest from the build metadata file")
+		} else {
+			if options.IidFile != "" {
+				if err := filesystem.WriteFile(options.IidFile, []byte(id), 0644); err != nil {
+					return err
+				}
+			}
+			// In quiet mode, the digest of a loaded image is printed by loadImage.
+			// When the image does not need loading (e.g. buildkitd with the containerd worker),
+			// print the digest here instead, so that `nerdctl build -q` outputs the image ID.
+			// https://github.com/containerd/nerdctl/issues/2015
+			if options.Quiet && !needsLoading {
+				fmt.Fprintln(options.Stdout, id)
+			}
 		}
 	}
 
@@ -191,6 +208,16 @@ func loadImage(ctx context.Context, in io.Reader, namespace, address, snapshotte
 	}
 
 	return nil
+}
+
+// GetEffectiveSourcePolicyFile returns the effective source policy file path.
+// If optionValue is set, it takes precedence. Otherwise, the EXPERIMENTAL_BUILDKIT_SOURCE_POLICY
+// environment variable is used for Docker Buildx compatibility.
+func GetEffectiveSourcePolicyFile(optionValue string) string {
+	if optionValue != "" {
+		return optionValue
+	}
+	return os.Getenv("EXPERIMENTAL_BUILDKIT_SOURCE_POLICY")
 }
 
 func generateBuildctlArgs(ctx context.Context, client *containerd.Client, options types.BuilderBuildOptions) (buildCtlBinary string,
@@ -403,6 +430,15 @@ func generateBuildctlArgs(ctx context.Context, client *containerd.Client, option
 	for _, s := range strutil.DedupeStrSlice(options.Attest) {
 		optAttestType, optAttestAttrs, _ := strings.Cut(s, ",")
 		if strings.HasPrefix(optAttestType, "type=") {
+			if strings.HasPrefix(optAttestAttrs, "disabled=") {
+				disabled, err := strconv.ParseBool(strings.TrimPrefix(optAttestAttrs, "disabled="))
+				if err != nil {
+					return "", nil, false, "", nil, nil, fmt.Errorf("invalid value for attribute \"disabled\"")
+				}
+				if disabled {
+					continue
+				}
+			}
 			optAttestType := strings.TrimPrefix(optAttestType, "type=")
 			buildctlArgs = append(buildctlArgs, fmt.Sprintf("--opt=attest:%s=%s", optAttestType, optAttestAttrs))
 		} else {
@@ -432,7 +468,11 @@ func generateBuildctlArgs(ctx context.Context, client *containerd.Client, option
 		log.L.Warn("ignoring deprecated flag: '--rm=false'")
 	}
 
-	if options.IidFile != "" {
+	// The metadata file is needed to obtain the image digest: when --iidfile is passed,
+	// and in quiet mode when the image is not loaded (e.g. buildkitd with the containerd worker),
+	// in which case the digest is not printed by the load path.
+	// https://github.com/containerd/nerdctl/issues/2015
+	if options.IidFile != "" || (options.Quiet && !needsLoading) {
 		file, err := os.CreateTemp("", "buildkit-meta-*")
 		if err != nil {
 			return "", nil, false, "", nil, cleanup, err
@@ -462,11 +502,16 @@ func generateBuildctlArgs(ctx context.Context, client *containerd.Client, option
 		buildctlArgs = append(buildctlArgs, "--opt=add-hosts="+strings.Join(extraHosts, ","))
 	}
 
+	// Source policy file: use explicit option if set, otherwise fallback to env var for Buildx compatibility
+	if sourcePolicyFile := GetEffectiveSourcePolicyFile(options.SourcePolicyFile); sourcePolicyFile != "" {
+		buildctlArgs = append(buildctlArgs, "--source-policy-file="+sourcePolicyFile)
+	}
+
 	return buildctlBinary, buildctlArgs, needsLoading, metaFile, tags, cleanup, nil
 }
 
 func getDigestFromMetaFile(path string) (string, error) {
-	data, err := os.ReadFile(path)
+	data, err := filesystem.ReadFile(path)
 	if err != nil {
 		return "", err
 	}

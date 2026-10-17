@@ -42,14 +42,18 @@ func createCommand() *cobra.Command {
 	cmd.Flags().StringP("driver", "d", DefaultNetworkDriver, "Driver to manage the Network")
 	cmd.RegisterFlagCompletionFunc("driver", completion.NetworkDrivers)
 	cmd.Flags().StringArrayP("opt", "o", nil, "Set driver specific options")
+	cmd.RegisterFlagCompletionFunc("opt", completion.NetworkOptions)
 	cmd.Flags().String("ipam-driver", "default", "IP Address helpers.Management Driver")
 	cmd.RegisterFlagCompletionFunc("ipam-driver", completion.IPAMDrivers)
 	cmd.Flags().StringArray("ipam-opt", nil, "Set IPAM driver specific options")
 	cmd.Flags().StringArray("subnet", nil, `Subnet in CIDR format that represents a network segment, e.g. "10.5.0.0/16"`)
-	cmd.Flags().String("gateway", "", `Gateway for the master subnet`)
-	cmd.Flags().String("ip-range", "", `Allocate container ip from a sub-range`)
+	cmd.Flags().StringArray("gateway", nil, "IPv4 or IPv6 Gateway for the master subnet")
+	cmd.Flags().StringArray("ip-range", nil, `Allocate container ip from a sub-range`)
+	cmd.Flags().StringArray("aux-address", nil, "Auxiliary IPv4 or IPv6 addresses used by Network driver, as name=IP pairs. The IPs are reserved and never assigned to containers")
 	cmd.Flags().StringArray("label", nil, "Set metadata for a network")
+	cmd.Flags().Bool("ipv4", true, "Enable IPv4 networking (set to false together with --ipv6 for an IPv6-only network)")
 	cmd.Flags().Bool("ipv6", false, "Enable IPv6 networking")
+	cmd.Flags().Bool("internal", false, "Restrict external access to the network")
 	return cmd
 }
 
@@ -82,11 +86,15 @@ func createAction(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return err
 	}
-	gatewayStr, err := cmd.Flags().GetString("gateway")
+	gateways, err := cmd.Flags().GetStringArray("gateway")
 	if err != nil {
 		return err
 	}
-	ipRangeStr, err := cmd.Flags().GetString("ip-range")
+	ipRanges, err := cmd.Flags().GetStringArray("ip-range")
+	if err != nil {
+		return err
+	}
+	auxAddresses, err := cmd.Flags().GetStringArray("aux-address")
 	if err != nil {
 		return err
 	}
@@ -95,22 +103,33 @@ func createAction(cmd *cobra.Command, args []string) error {
 		return err
 	}
 	labels = strutil.DedupeStrSlice(labels)
+	ipv4, err := cmd.Flags().GetBool("ipv4")
+	if err != nil {
+		return err
+	}
 	ipv6, err := cmd.Flags().GetBool("ipv6")
+	if err != nil {
+		return err
+	}
+	internal, err := cmd.Flags().GetBool("internal")
 	if err != nil {
 		return err
 	}
 
 	return network.Create(types.NetworkCreateOptions{
-		GOptions:    globalOptions,
-		Name:        name,
-		Driver:      driver,
-		Options:     strutil.ConvertKVStringsToMap(opts),
-		IPAMDriver:  ipamDriver,
-		IPAMOptions: strutil.ConvertKVStringsToMap(ipamOpts),
-		Subnets:     subnets,
-		Gateway:     gatewayStr,
-		IPRange:     ipRangeStr,
-		Labels:      labels,
-		IPv6:        ipv6,
+		GOptions:     globalOptions,
+		Name:         name,
+		Driver:       driver,
+		Options:      strutil.ConvertKVStringsToMap(opts),
+		IPAMDriver:   ipamDriver,
+		IPAMOptions:  strutil.ConvertKVStringsToMap(ipamOpts),
+		Subnets:      subnets,
+		Gateway:      gateways,
+		IPRange:      ipRanges,
+		AuxAddresses: auxAddresses,
+		Labels:       labels,
+		IPv6:         ipv6,
+		IPv4:         &ipv4,
+		Internal:     internal,
 	}, cmd.OutOrStdout())
 }

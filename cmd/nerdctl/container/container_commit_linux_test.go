@@ -19,8 +19,10 @@ package container
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/containerd/nerdctl/mod/tigron/test"
+	"github.com/containerd/nerdctl/mod/tigron/tig"
 
 	"github.com/containerd/nerdctl/v2/pkg/testutil"
 	"github.com/containerd/nerdctl/v2/pkg/testutil/nerdtest"
@@ -41,7 +43,7 @@ func TestKubeCommitSave(t *testing.T) {
 		nerdtest.KubeCtlCommand(helpers, "wait", "pod", identifier, "--for=condition=ready", "--timeout=1m").Run(&test.Expected{})
 		nerdtest.KubeCtlCommand(helpers, "exec", identifier, "--", "mkdir", "-p", "/tmp/whatever").Run(&test.Expected{})
 		nerdtest.KubeCtlCommand(helpers, "get", "pods", identifier, "-o", "jsonpath={ .status.containerStatuses[0].containerID }").Run(&test.Expected{
-			Output: func(stdout string, info string, t *testing.T) {
+			Output: func(stdout string, t tig.T) {
 				containerID = strings.TrimPrefix(stdout, "containerd://")
 			},
 		})
@@ -53,8 +55,22 @@ func TestKubeCommitSave(t *testing.T) {
 	}
 
 	testCase.Command = func(data test.Data, helpers test.Helpers) test.TestableCommand {
-		helpers.Ensure("commit", data.Labels().Get("containerID"), "testcommitsave")
-		return helpers.Command("save", "testcommitsave")
+		helpers.Ensure("commit", data.Labels().Get("containerID"), data.Identifier("testcommitsave"))
+		// Wait for the image to show up
+		for range 5 {
+			found := false
+			cmd := helpers.Command("images", data.Identifier("testcommitsave"), "--format", "json")
+			cmd.Run(&test.Expected{
+				Output: func(stdout string, t tig.T) {
+					found = strings.TrimSpace(stdout) != ""
+				},
+			})
+			if found {
+				break
+			}
+			time.Sleep(1 * time.Second)
+		}
+		return helpers.Command("save", data.Identifier("testcommitsave"))
 	}
 
 	testCase.Expected = test.Expects(0, nil, nil)
@@ -73,7 +89,7 @@ func TestKubeCommitSave(t *testing.T) {
 
 				cmd = nerdtest.KubeCtlCommand(helpers, "get", "pods", tID, "-o", "jsonpath={ .status.hostIPs[0].ip }")
 				cmd.Run(&test.Expected{
-					Output: func(stdout string, info string, t *testing.T) {
+					Output: func(stdout string, t tig.T) {
 						registryIP = stdout
 					},
 				})

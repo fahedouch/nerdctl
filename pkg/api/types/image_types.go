@@ -19,7 +19,7 @@ package types
 import (
 	"io"
 
-	"github.com/opencontainers/image-spec/specs-go/v1"
+	ocispec "github.com/opencontainers/image-spec/specs-go/v1"
 )
 
 // ImageListOptions specifies options for `nerdctl image list`.
@@ -43,12 +43,15 @@ type ImageListOptions struct {
 	Names bool
 	// All (unimplemented yet, always true)
 	All bool
+	// Tree list multi-platform images as a tree, with a row per platform
+	Tree bool
 }
 
 // ImageConvertOptions specifies options for `nerdctl image convert`.
 type ImageConvertOptions struct {
-	Stdout   io.Writer
-	GOptions GlobalCommandOptions
+	Stdout         io.Writer
+	ProgressOutput io.Writer
+	GOptions       GlobalCommandOptions
 
 	// #region generic flags
 	// Uncompress convert tar.gz layers to uncompressed tar layers
@@ -67,7 +70,18 @@ type ImageConvertOptions struct {
 	// Format the output using the given Go template, e.g, 'json'
 	Format string
 
-	// #region estargz flags
+	// Embed image format options
+	EstargzOptions
+	ZstdOptions
+	ZstdChunkedOptions
+	NydusOptions
+	OverlaybdOptions
+	SociConvertOptions
+	ErofsOptions
+}
+
+// EstargzOptions contains eStargz conversion options
+type EstargzOptions struct {
 	// Estargz convert legacy tar(.gz) layers to eStargz for lazy pulling. Should be used in conjunction with '--oci'
 	Estargz bool
 	// EstargzRecordIn read 'ctr-remote optimize --record-out=<FILE>' record file (EXPERIMENTAL)
@@ -82,16 +96,20 @@ type ImageConvertOptions struct {
 	EstargzExternalToc bool
 	// EstargzKeepDiffID convert to esgz without changing diffID (cannot be used in conjunction with '--estargz-record-in'. must be specified with '--estargz-external-toc')
 	EstargzKeepDiffID bool
-	// #endregion
+	// EstargzGzipHelper helper command for decompressing layers compressed with gzip. Options: pigz, igzip, or gzip
+	EstargzGzipHelper string
+}
 
-	// #region zstd flags
+// ZstdOptions contains zstd conversion options
+type ZstdOptions struct {
 	// Zstd convert legacy tar(.gz) layers to zstd. Should be used in conjunction with '--oci'
 	Zstd bool
 	// ZstdCompressionLevel zstd compression level
 	ZstdCompressionLevel int
-	// #endregion
+}
 
-	// #region zstd:chunked flags
+// ZstdChunkedOptions contains zstd:chunked conversion options
+type ZstdChunkedOptions struct {
 	// ZstdChunked convert legacy tar(.gz) layers to zstd:chunked for lazy pulling. Should be used in conjunction with '--oci'
 	ZstdChunked bool
 	// ZstdChunkedCompressionLevel zstd compression level
@@ -100,9 +118,10 @@ type ImageConvertOptions struct {
 	ZstdChunkedChunkSize int
 	// ZstdChunkedRecordIn read 'ctr-remote optimize --record-out=<FILE>' record file (EXPERIMENTAL)
 	ZstdChunkedRecordIn string
-	// #endregion
+}
 
-	// #region nydus flags
+// NydusOptions contains nydus conversion options
+type NydusOptions struct {
 	// Nydus convert legacy tar(.gz) layers to nydus for lazy pulling. Should be used in conjunction with '--oci'
 	Nydus bool
 	// NydusBuilderPath the nydus-image binary path, if unset, search in PATH environment
@@ -113,17 +132,37 @@ type ImageConvertOptions struct {
 	NydusPrefetchPatterns string
 	// NydusCompressor nydus blob compression algorithm, possible values: `none`, `lz4_block`, `zstd`, default is `lz4_block`
 	NydusCompressor string
-	// #endregion
+}
 
-	// #region overlaybd flags
+// OverlaybdOptions contains overlaybd conversion options
+type OverlaybdOptions struct {
 	// Overlaybd convert tar.gz layers to overlaybd layers
 	Overlaybd bool
 	// OverlayFsType filesystem type for overlaybd
 	OverlayFsType string
 	// OverlaydbDBStr database config string for overlaybd
 	OverlaydbDBStr string
+	// OverlaybdVsize virtual block device size in GB for overlaybd
+	OverlaybdVsize int
 	// #endregion
+}
 
+type SociConvertOptions struct {
+	// Soci convert image to SOCI format.
+	Soci bool
+	// SociOptions contains SOCI-specific options
+	SociOptions SociOptions
+	// #endregion
+}
+
+// ErofsOptions contains EROFS conversion options
+type ErofsOptions struct {
+	// Erofs convert image layers to EROFS media type. Supported values: "raw" and "zstd"
+	Erofs string
+	// ErofsCompressors specifies mkfs compressor options, e.g. "lz4hc,12"
+	ErofsCompressors string
+	// ErofsMkfsOptions specifies extra options for mkfs.erofs, e.g. "-T0 --mkfs-time"
+	ErofsMkfsOptions string
 }
 
 // ImageCryptOptions specifies options for `nerdctl image encrypt` and `nerdctl image decrypt`.
@@ -168,6 +207,8 @@ type ImagePushOptions struct {
 	Platforms []string
 	// AllPlatforms convert content for all platforms
 	AllPlatforms bool
+	// AllTags push all the tags of the repository named by the reference
+	AllTags bool
 
 	// Estargz convert image to sStargz
 	Estargz bool
@@ -200,7 +241,7 @@ type ImagePullOptions struct {
 	// If nil, it will unpack automatically if only 1 platform is specified.
 	Unpack *bool
 	// Content for specific platforms. Empty if `--all-platforms` is true
-	OCISpecPlatform []v1.Platform
+	OCISpecPlatform []ocispec.Platform
 	// Pull mode
 	Mode string
 	// Suppress verbose output
@@ -253,6 +294,8 @@ type ImageSaveOptions struct {
 	AllPlatforms bool
 	// Export content for a specific platform
 	Platform []string
+	// Quiet suppresses the progress output.
+	Quiet bool
 }
 
 // ImageSignOptions contains options for signing an image. It contains options from
@@ -289,4 +332,8 @@ type SociOptions struct {
 	SpanSize int64
 	// Minimum layer size to build zTOC for. Smaller layers won't have zTOC and not lazy pulled. Default is 10 MiB.
 	MinLayerSize int64
+	// Platforms convert content for a specific platform
+	Platforms []string
+	// AllPlatforms convert content for all platforms
+	AllPlatforms bool
 }

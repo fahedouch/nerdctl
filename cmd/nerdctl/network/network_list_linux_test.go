@@ -23,6 +23,7 @@ import (
 	"gotest.tools/v3/assert"
 
 	"github.com/containerd/nerdctl/mod/tigron/test"
+	"github.com/containerd/nerdctl/mod/tigron/tig"
 
 	"github.com/containerd/nerdctl/v2/pkg/testutil/nerdtest"
 )
@@ -52,16 +53,16 @@ func TestNetworkLsFilter(t *testing.T) {
 			},
 			Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
 				return &test.Expected{
-					Output: func(stdout string, info string, t *testing.T) {
+					Output: func(stdout string, t tig.T) {
 						var lines = strings.Split(strings.TrimSpace(stdout), "\n")
-						assert.Assert(t, len(lines) >= 1, info)
+						assert.Assert(t, len(lines) >= 1, "expected at least one line\n")
 						netNames := map[string]struct{}{
 							data.Labels().Get("netID1")[:12]: {},
 						}
 
 						for _, name := range lines {
 							_, ok := netNames[name]
-							assert.Assert(t, ok, info)
+							assert.Assert(t, ok, "expected to find name\n")
 						}
 					},
 				}
@@ -74,16 +75,63 @@ func TestNetworkLsFilter(t *testing.T) {
 			},
 			Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
 				return &test.Expected{
-					Output: func(stdout string, info string, t *testing.T) {
+					Output: func(stdout string, t tig.T) {
 						var lines = strings.Split(strings.TrimSpace(stdout), "\n")
-						assert.Assert(t, len(lines) >= 1, info)
+						assert.Assert(t, len(lines) >= 1, "expected at least one line\n")
 						netNames := map[string]struct{}{
 							data.Labels().Get("netID2")[:12]: {},
 						}
 
 						for _, name := range lines {
 							_, ok := netNames[name]
-							assert.Assert(t, ok, info)
+							assert.Assert(t, ok, "expected to find name\n")
+						}
+					},
+				}
+			},
+		},
+		{
+			Description: "filter name regexp",
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				return helpers.Command("network", "ls", "--quiet", "--filter", "name=.*"+data.Labels().Get("net2")+".*")
+			},
+			Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
+				return &test.Expected{
+					Output: func(stdout string, t tig.T) {
+						var lines = strings.Split(strings.TrimSpace(stdout), "\n")
+						assert.Assert(t, len(lines) >= 1)
+						netNames := map[string]struct{}{
+							data.Labels().Get("netID2")[:12]: {},
+						}
+
+						for _, name := range lines {
+							_, ok := netNames[name]
+							assert.Assert(t, ok)
+						}
+					},
+				}
+			},
+		},
+		{
+			Description: "filter multiple names",
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				return helpers.Command("network", "ls", "--quiet",
+					"--filter", "name="+data.Labels().Get("net1"),
+					"--filter", "name="+data.Labels().Get("net2"))
+			},
+			Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
+				return &test.Expected{
+					Output: func(stdout string, t tig.T) {
+						lines := strings.Split(strings.TrimSpace(stdout), "\n")
+						assert.Equal(t, len(lines), 2)
+						netIDs := map[string]struct{}{
+							data.Labels().Get("netID1")[:12]: {},
+							data.Labels().Get("netID2")[:12]: {},
+						}
+						for _, id := range lines {
+							_, ok := netIDs[id]
+							assert.Assert(t, ok)
+							delete(netIDs, id)
 						}
 					},
 				}

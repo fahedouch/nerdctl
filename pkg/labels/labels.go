@@ -41,6 +41,9 @@ const (
 	//Compose Volume Name
 	ComposeVolume = "com.docker.compose.volume"
 
+	// ComposeConfigHash stores the service configuration hash used for convergence decisions
+	ComposeConfigHash = "com.docker.compose.config-hash"
+
 	// Hostname
 	Hostname = Prefix + "hostname"
 
@@ -57,6 +60,7 @@ const (
 	// Currently, the length of the slice must be 1.
 	Networks = Prefix + "networks"
 
+	// DEPRECATED : https://github.com/containerd/nerdctl/pull/4290
 	// Ports is a JSON-marshalled string of []cni.PortMapping .
 	Ports = Prefix + "ports"
 
@@ -76,11 +80,28 @@ const (
 	// AnonymousVolumes is a JSON-marshalled string of []string
 	AnonymousVolumes = Prefix + "anonymous-volumes"
 
+	// ImageMountSnapshots is a JSON-marshalled []string of snapshotter keys for
+	// the read-only views backing `--mount type=image`, removed on container deletion.
+	ImageMountSnapshots = Prefix + "image-mount-snapshots"
+
+	// ImageMountHostpaths is a JSON-marshalled []string of host directories where
+	// `--mount type=image,image-subpath=...` rootfs views are materialized; each
+	// must be unmounted and removed on container deletion.
+	ImageMountHostpaths = Prefix + "image-mount-hostpaths"
+
 	// Platform is the normalized platform string like "linux/ppc64le".
 	Platform = Prefix + "platform"
 
+	// ImageDigest is the digest of the image target the container was created from. The image name
+	// stored by containerd can be retagged to point at something else, so it is not enough to tell
+	// which image a container actually uses.
+	ImageDigest = Prefix + "image-digest"
+
 	// Mounts is the mount points for the container.
 	Mounts = Prefix + "mounts"
+
+	// MountsKeyFormat is used to dynamically store individual mounts
+	MountsKeyFormat = Prefix + "mounts.%d"
 
 	// StopTimeout is seconds to wait for stop a container.
 	StopTimeout = Prefix + "stop-timeout"
@@ -104,6 +125,13 @@ const (
 	// (like "nerdctl/default-network=true" or "nerdctl/default-network=false")
 	NerdctlDefaultNetwork = Prefix + "default-network"
 
+	// NetworkAuxAddresses stores a network's reserved --aux-address name=IP
+	// pairs, grouped per subnet, as a JSON object (map[subnetCIDR]map[name]IP).
+	// host-local has no field for auxiliary addresses, so they are kept here
+	// instead of in the CNI config and read back by `network inspect` to report
+	// AuxiliaryAddresses like Docker.
+	NetworkAuxAddresses = Prefix + "network-aux-addresses"
+
 	// ContainerAutoRemove is to check whether the --rm option is specified.
 	ContainerAutoRemove = Prefix + "auto-remove"
 
@@ -118,4 +146,15 @@ const (
 
 	// User is the username of the container
 	User = Prefix + "user"
+
+	// HealthCheck stores the health check configuration used to run health checks on the container
+	HealthCheck = Prefix + "healthcheck"
+
+	// HealthState stores the current health state (status and failing streak).
+	HealthState = Prefix + "healthstate"
+
+	// Privileged indicates whether the container was created with --privileged.
+	Privileged = Prefix + "privileged"
+	// ExposedPorts is a JSON-marshalled string of nat.PortSet.
+	ExposedPorts = Prefix + "exposed-ports"
 )

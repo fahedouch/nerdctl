@@ -17,7 +17,7 @@
 package logging
 
 import (
-	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -28,6 +28,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
@@ -38,7 +39,7 @@ import (
 	"github.com/containerd/errdefs"
 	"github.com/containerd/log"
 
-	"github.com/containerd/nerdctl/v2/pkg/lockutil"
+	"github.com/containerd/nerdctl/v2/pkg/internal/filesystem"
 )
 
 const (
@@ -52,11 +53,32 @@ const (
 	Labels     = "labels"
 )
 
+const (
+	streamStdout = "stdout"
+	streamStderr = "stderr"
+)
+
 type Driver interface {
 	Init(dataStore, ns, id string) error
 	PreProcess(ctx context.Context, dataStore string, config *logging.Config) error
 	Process(stdout <-chan string, stderr <-chan string) error
 	PostProcess() error
+}
+
+// SyncDriver is an optional capability for a Driver whose log entries can be
+// written synchronously and cheaply (e.g. to a local file). When a driver
+// implements it, the logger writes each entry by calling WriteLogEntry directly
+// from the goroutine that reads the container's stdio, rather than handing it to
+// Process over a buffered channel. This makes a container's final output (in
+// particular a trailing chunk with no newline) durable before containerd tears
+// the logging process down on exit. Drivers that may block, such as
+// network-backed ones, should not implement it so that the buffered channel
+// keeps them from blocking the container. https://github.com/containerd/nerdctl/issues/5006
+type SyncDriver interface {
+	Driver
+	// WriteLogEntry writes a single log line for the given stream ("stdout" or
+	// "stderr"). It may be called concurrently for different streams.
+	WriteLogEntry(stream, line string) error
 }
 
 type DriverFactory func(map[string]string, string) (Driver, error)
@@ -142,7 +164,7 @@ func LoadLogConfig(dataStore, ns, id string) (LogConfig, error) {
 	logConfig := LogConfig{}
 
 	logConfigFilePath := LogConfigFilePath(dataStore, ns, id)
-	logConfigData, err := os.ReadFile(logConfigFilePath)
+	logConfigData, err := filesystem.ReadFile(logConfigFilePath)
 	if err != nil {
 		return logConfig, fmt.Errorf("failed to read log config file %q: %w", logConfigFilePath, err)
 	}
@@ -160,52 +182,106 @@ func getLockPath(dataStore, ns, id string) string {
 
 // WaitForLogger waits until the logger has finished executing and processing container logs
 func WaitForLogger(dataStore, ns, id string) error {
-	return lockutil.WithDirLock(getLockPath(dataStore, ns, id), func() error {
+	return filesystem.WithLock(getLockPath(dataStore, ns, id), func() error {
 		return nil
 	})
 }
 
-func getContainerWait(ctx context.Context, address string, config *logging.Config) (<-chan containerd.ExitStatus, error) {
+// alreadyExited returns a channel that immediately reports an exit, used when
+// we have determined that the container's task is already gone.
+func alreadyExited() <-chan containerd.ExitStatus {
+	ch := make(chan containerd.ExitStatus, 1)
+	ch <- containerd.ExitStatus{}
+	return ch
+}
+
+func getContainerWait(ctx context.Context, address string, config *logging.Config, outputSeen func() bool) (<-chan containerd.ExitStatus, error) {
 	client, err := containerd.New(strings.TrimPrefix(address, "unix://"), containerd.WithDefaultNamespace(config.Namespace))
 	if err != nil {
 		return nil, err
 	}
+	// closeAfterDelivery forwards the first delivery from ch and then closes
+	// the client, so that callers which re-arm the wait (see the wait loop in
+	// loggingProcessAdapter) do not accumulate open clients.
+	closeAfterDelivery := func(ch <-chan containerd.ExitStatus) <-chan containerd.ExitStatus {
+		out := make(chan containerd.ExitStatus, 1)
+		go func() {
+			defer close(out)
+			defer client.Close()
+			if status, ok := <-ch; ok {
+				out <- status
+			}
+		}()
+		return out
+	}
 	con, err := client.LoadContainer(ctx, config.ID)
 	if err != nil {
+		client.Close()
 		return nil, err
 	}
 
 	task, err := con.Task(ctx, nil)
 	if err == nil {
-		return task.Wait(ctx)
+		exitCh, err := task.Wait(ctx)
+		if err != nil {
+			client.Close()
+			return nil, err
+		}
+		return closeAfterDelivery(exitCh), nil
 	}
 	if !errdefs.IsNotFound(err) {
+		client.Close()
 		return nil, err
 	}
 
-	// If task was not found, it's possible that the container runtime is still being created.
-	// Retry every 100ms.
+	// The task was not found. containerd starts this logging process while
+	// setting up the container's IO, i.e. before the task is created, so a
+	// NotFound here usually just means the task has not been created yet: retry
+	// until it appears.
+	//
+	// However, for a short-lived container the task may instead have already
+	// exited and been removed before we ever observed it (this is more likely
+	// when this logger process is slow to start, e.g. under gomodjail). In that
+	// case the task will never appear and waiting for it would hang the logger
+	// forever, holding the logger lock and truncating the container's final
+	// output. Once we have seen the container produce output we therefore know
+	// it has run, so a still-missing task means it has already exited.
+	// https://github.com/containerd/nerdctl/issues/5006
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
+			client.Close()
 			return nil, errors.New("timed out waiting for container task to start")
 		case <-ticker.C:
 			task, err = con.Task(ctx, nil)
-			if err != nil {
-				if errdefs.IsNotFound(err) {
-					continue
+			if err == nil {
+				exitCh, err := task.Wait(ctx)
+				if err != nil {
+					client.Close()
+					return nil, err
 				}
+				return closeAfterDelivery(exitCh), nil
+			}
+			if !errdefs.IsNotFound(err) {
+				client.Close()
 				return nil, err
 			}
-			return task.Wait(ctx)
+			if outputSeen() {
+				client.Close()
+				return alreadyExited(), nil
+			}
 		}
 	}
 }
 
-type ContainerWaitFunc func(ctx context.Context, address string, config *logging.Config) (<-chan containerd.ExitStatus, error)
+type ContainerWaitFunc func(ctx context.Context, address string, config *logging.Config, outputSeen func() bool) (<-chan containerd.ExitStatus, error)
+
+// containerWaitRetryDelay is how long the logger waits before re-arming the
+// container wait after the wait channel delivered an error instead of an exit.
+const containerWaitRetryDelay = 1 * time.Second
 
 func loggingProcessAdapter(ctx context.Context, driver Driver, dataStore, address string, getContainerWait ContainerWaitFunc, config *logging.Config) error {
 	if err := driver.PreProcess(ctx, dataStore, config); err != nil {
@@ -226,60 +302,141 @@ func loggingProcessAdapter(ctx context.Context, driver Driver, dataStore, addres
 		stderrR.Cancel()
 	}()
 
-	// initialize goroutines to copy stdout and stderr streams to a closable pipe
-	pipeStdoutR, pipeStdoutW := io.Pipe()
-	pipeStderrR, pipeStderrW := io.Pipe()
-	copyStream := func(reader io.Reader, writer *io.PipeWriter) {
-		// copy using a buffer of size 32K
-		buf := make([]byte, 32<<10)
-		_, err := io.CopyBuffer(writer, reader, buf)
-		if err != nil {
-			log.G(ctx).Errorf("failed to copy stream: %s", err)
-		}
-	}
-	go copyStream(stdoutR, pipeStdoutW)
-	go copyStream(stderrR, pipeStderrW)
+	// copiedBytes counts how much container output has been read so far. It lets
+	// getContainerWait tell "the task has not been created yet" apart from "the
+	// task has already exited and been removed" when it sees a missing task.
+	var copiedBytes atomic.Int64
+	outputSeen := func() bool { return copiedBytes.Load() > 0 }
 
-	var wg sync.WaitGroup
-	wg.Add(3)
 	stdout := make(chan string, 10000)
 	stderr := make(chan string, 10000)
-	processLogFunc := func(reader io.Reader, dataChan chan string) {
-		defer wg.Done()
-		defer close(dataChan)
-		r := bufio.NewReader(reader)
 
-		var err error
-
-		for err == nil {
-			var s string
-			s, err = r.ReadString('\n')
-			if len(s) > 0 {
-				dataChan <- strings.TrimSuffix(s, "\n")
+	// If the driver can write synchronously, emit writes each log entry directly
+	// from the goroutine that reads the container's stdio. Otherwise it hands the
+	// entry to the driver's Process method over a buffered channel, which keeps a
+	// slow (e.g. network-backed) driver from blocking the container.
+	//
+	// The synchronous path matters because, when a container exits, containerd
+	// closes the stdio FIFOs and then tears the logging process down almost
+	// immediately. Handing the final chunk to another goroutine to write races
+	// that teardown and can lose a trailing chunk that has no newline; writing it
+	// inline does not. https://github.com/containerd/nerdctl/issues/5006
+	syncDriver, isSync := driver.(SyncDriver)
+	emit := func(stream, line string) {
+		if isSync {
+			if err := syncDriver.WriteLogEntry(stream, line); err != nil {
+				log.G(ctx).WithError(err).Error("failed to write log entry")
 			}
+			return
+		}
+		if stream == streamStdout {
+			stdout <- line
+		} else {
+			stderr <- line
+		}
+	}
 
-			if err != nil && err != io.EOF {
-				log.L.WithError(err).Error("failed to read log")
+	var wg sync.WaitGroup
+
+	// processStream reads a container stdio FIFO directly and emits its output
+	// split into newline-terminated lines. Complete lines are emitted as they are
+	// read; a trailing fragment without a newline is buffered until more output
+	// arrives (so a long line is not split) and emitted when the stream ends.
+	processStream := func(stream string, reader io.Reader, dataChan chan string) {
+		defer wg.Done()
+		if !isSync {
+			defer close(dataChan)
+		}
+		buf := make([]byte, 32<<10)
+		var pending []byte
+		// emitLines emits each complete (newline-terminated) line, leaving any
+		// trailing fragment buffered in pending so that a single logical line is
+		// not split across log entries.
+		emitLines := func() {
+			for {
+				i := bytes.IndexByte(pending, '\n')
+				if i < 0 {
+					break
+				}
+				emit(stream, string(pending[:i+1]))
+				pending = pending[i+1:]
+			}
+		}
+		for {
+			nr, err := reader.Read(buf)
+			if nr > 0 {
+				copiedBytes.Add(int64(nr))
+				pending = append(pending, buf[:nr]...)
+				emitLines()
+				// For a synchronous driver, emit a trailing fragment immediately
+				// instead of buffering it until the stream ends. The fragment is
+				// then written to the log before the container's abrupt teardown
+				// on exit can lose it; for a streaming (channel) driver this would
+				// only split lines, so it is left buffered there.
+				if isSync && len(pending) > 0 {
+					emit(stream, string(pending))
+					pending = pending[:0]
+				}
+			}
+			if err != nil {
+				emitLines()
+				// The stream has ended: emit any final fragment that did not end
+				// in a newline.
+				if len(pending) > 0 {
+					emit(stream, string(pending))
+				}
+				if !errors.Is(err, io.EOF) && !errors.Is(err, cancelreader.ErrCanceled) {
+					log.L.WithError(err).Error("failed to read log")
+				}
+				return
 			}
 		}
 	}
-	go processLogFunc(pipeStdoutR, stdout)
-	go processLogFunc(pipeStderrR, stderr)
+	wg.Add(2)
+	go processStream(streamStdout, stdoutR, stdout)
+	go processStream(streamStderr, stderrR, stderr)
+	if !isSync {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			driver.Process(stdout, stderr)
+		}()
+	}
 	go func() {
-		defer wg.Done()
-		driver.Process(stdout, stderr)
-	}()
-	go func() {
-		// close pipeStdoutW and pipeStderrW upon container exit
-		defer pipeStdoutW.Close()
-		defer pipeStderrW.Close()
-
-		exitCh, err := getContainerWait(ctx, address, config)
-		if err != nil {
-			log.G(ctx).Errorf("failed to get container task wait channel: %v", err)
-			return
+		// Wait for the container to exit, then cancel the readers. containerd
+		// keeps the stdio FIFO write ends open (so the container can be
+		// restarted), so the FIFOs may not reach EOF on exit; without this the
+		// read goroutines, and therefore the logger, could block forever.
+		for {
+			exitCh, err := getContainerWait(ctx, address, config, outputSeen)
+			if err != nil {
+				// We could not determine when the container exits. Do not cancel the
+				// readers: they will finish on their own when the FIFO reaches EOF.
+				// Cancelling here could truncate a still-running container.
+				log.G(ctx).Errorf("failed to get container task wait channel: %v", err)
+				return
+			}
+			status := <-exitCh
+			if status.Error() == nil {
+				// The container has exited.
+				break
+			}
+			// The channel delivered a Wait RPC error, not a container exit:
+			// containerd's client sends Wait failures through the same channel
+			// as a synthetic ExitStatus (client/task.go). Treating that as an
+			// exit would cancel the readers, and with them all logging, while
+			// the container is still running. Re-arm the wait instead.
+			// https://github.com/containerd/nerdctl/issues/5137
+			log.G(ctx).WithError(status.Error()).Warn("error while waiting for container exit; retrying")
+			select {
+			case <-ctx.Done():
+				// SIGTERM: the goroutine above already cancels the readers.
+				return
+			case <-time.After(containerWaitRetryDelay):
+			}
 		}
-		<-exitCh
+		stdoutR.Cancel()
+		stderrR.Cancel()
 	}()
 	wg.Wait()
 	return driver.PostProcess()
@@ -305,16 +462,11 @@ func loggerFunc(dataStore string) (logging.LoggerFunc, error) {
 			}
 
 			loggerLock := getLockPath(dataStore, config.Namespace, config.ID)
-			f, err := os.Create(loggerLock)
-			if err != nil {
-				return err
-			}
-			defer f.Close()
 
 			// the logger will obtain an exclusive lock on a file until the container is
 			// stopped and the driver has finished processing all output,
 			// so that waiting log viewers can be signalled when the process is complete.
-			return lockutil.WithDirLock(loggerLock, func() error {
+			return filesystem.WithLock(loggerLock, func() error {
 				if err := ready(); err != nil {
 					return err
 				}

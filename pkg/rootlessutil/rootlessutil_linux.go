@@ -24,7 +24,7 @@ import (
 	"strconv"
 
 	"github.com/containernetworking/plugins/pkg/ns"
-	"github.com/rootless-containers/rootlesskit/v2/pkg/api/client"
+	"github.com/rootless-containers/rootlesskit/v3/pkg/api/client"
 )
 
 func IsRootless() bool {
@@ -42,21 +42,6 @@ func ParentEUID() int {
 	i, err := strconv.Atoi(env)
 	if err != nil {
 		panic(fmt.Errorf("failed to parse ROOTLESSKIT_PARENT_EUID=%q: %w", env, err))
-	}
-	return i
-}
-
-func ParentEGID() int {
-	if !IsRootlessChild() {
-		return os.Getegid()
-	}
-	env := os.Getenv("ROOTLESSKIT_PARENT_EGID")
-	if env == "" {
-		panic("environment variable ROOTLESSKIT_PARENT_EGID is not set")
-	}
-	i, err := strconv.Atoi(env)
-	if err != nil {
-		panic(fmt.Errorf("failed to parse ROOTLESSKIT_PARENT_EGID=%q: %w", env, err))
 	}
 	return i
 }

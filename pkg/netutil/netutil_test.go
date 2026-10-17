@@ -30,8 +30,8 @@ import (
 	"gotest.tools/v3/assert"
 
 	ncdefaults "github.com/containerd/nerdctl/v2/pkg/defaults"
+	"github.com/containerd/nerdctl/v2/pkg/internal/filesystem"
 	"github.com/containerd/nerdctl/v2/pkg/labels"
-	"github.com/containerd/nerdctl/v2/pkg/testutil"
 )
 
 const testBridgeIP = "10.42.100.1/24" // nolint:unused
@@ -103,7 +103,6 @@ func TestParseIPAMRange(t *testing.T) {
 			expected: &IPAMRange{
 				Subnet:     "10.1.0.0/16",
 				Gateway:    "10.1.0.1",
-				IPRange:    "10.1.100.0/24",
 				RangeStart: "10.1.100.1",
 				RangeEnd:   "10.1.100.255",
 			},
@@ -114,7 +113,6 @@ func TestParseIPAMRange(t *testing.T) {
 			expected: &IPAMRange{
 				Subnet:     "10.1.100.0/23",
 				Gateway:    "10.1.100.1",
-				IPRange:    "10.1.100.0/25",
 				RangeStart: "10.1.100.1",
 				RangeEnd:   "10.1.100.127",
 			},
@@ -127,8 +125,172 @@ func TestParseIPAMRange(t *testing.T) {
 			assert.ErrorContains(t, err, tc.err)
 		} else {
 			assert.NilError(t, err)
-			assert.Equal(t, *tc.expected, *got)
+			assert.DeepEqual(t, *tc.expected, *got)
 		}
+	}
+}
+
+func TestParseAuxAddresses(t *testing.T) {
+	t.Parallel()
+	type testCase struct {
+		raw      []string
+		expected map[string]string
+		err      string
+	}
+	testCases := []testCase{
+		{
+			raw:      nil,
+			expected: nil,
+		},
+		{
+			raw:      []string{"router=10.1.100.5", "dns=10.1.100.6"},
+			expected: map[string]string{"router": "10.1.100.5", "dns": "10.1.100.6"},
+		},
+		{
+			// An empty name is allowed, matching Docker.
+			raw:      []string{"=10.1.100.5"},
+			expected: map[string]string{"": "10.1.100.5"},
+		},
+		{
+			// An entry with no "=" has an empty IP and is dropped, matching Docker.
+			raw:      []string{"10.1.100.5"},
+			expected: nil,
+		},
+		{
+			// A later value overrides an earlier one with the same name.
+			raw:      []string{"a=10.1.100.5", "a=10.1.100.6"},
+			expected: map[string]string{"a": "10.1.100.6"},
+		},
+		{
+			raw:      []string{"v6=2001:db8::5"},
+			expected: map[string]string{"v6": "2001:db8::5"},
+		},
+		{
+			raw: []string{"bad=not-an-ip"},
+			err: "invalid aux-address",
+		},
+	}
+	for _, tc := range testCases {
+		got, err := ParseAuxAddresses(tc.raw)
+		if tc.err != "" {
+			assert.ErrorContains(t, err, tc.err)
+			continue
+		}
+		assert.NilError(t, err)
+		assert.DeepEqual(t, tc.expected, got)
+	}
+}
+
+func TestSplitIPAMRange(t *testing.T) {
+	t.Parallel()
+	ips := func(addrs ...string) []net.IP {
+		out := make([]net.IP, len(addrs))
+		for i, a := range addrs {
+			out[i] = net.ParseIP(a)
+		}
+		return out
+	}
+	type testCase struct {
+		name     string
+		subnet   string
+		base     *IPAMRange
+		reserved []net.IP
+		expected []IPAMRange
+		err      string
+	}
+	testCases := []testCase{
+		{
+			name:     "no reservation leaves the range untouched",
+			subnet:   "10.1.100.0/24",
+			base:     &IPAMRange{Subnet: "10.1.100.0/24", Gateway: "10.1.100.1"},
+			reserved: nil,
+			expected: []IPAMRange{{Subnet: "10.1.100.0/24", Gateway: "10.1.100.1"}},
+		},
+		{
+			name:     "a mid-subnet reservation splits the range in two",
+			subnet:   "10.1.100.0/24",
+			base:     &IPAMRange{Subnet: "10.1.100.0/24", Gateway: "10.1.100.1"},
+			reserved: ips("10.1.100.5"),
+			expected: []IPAMRange{
+				{Subnet: "10.1.100.0/24", RangeStart: "10.1.100.1", RangeEnd: "10.1.100.4", Gateway: "10.1.100.1"},
+				{Subnet: "10.1.100.0/24", RangeStart: "10.1.100.6", RangeEnd: "10.1.100.254", Gateway: "10.1.100.1"},
+			},
+		},
+		{
+			name:     "two reservations produce three sub-ranges",
+			subnet:   "10.1.100.0/24",
+			base:     &IPAMRange{Subnet: "10.1.100.0/24", Gateway: "10.1.100.1"},
+			reserved: ips("10.1.100.6", "10.1.100.5"),
+			expected: []IPAMRange{
+				{Subnet: "10.1.100.0/24", RangeStart: "10.1.100.1", RangeEnd: "10.1.100.4", Gateway: "10.1.100.1"},
+				{Subnet: "10.1.100.0/24", RangeStart: "10.1.100.7", RangeEnd: "10.1.100.254", Gateway: "10.1.100.1"},
+			},
+		},
+		{
+			// The gateway is the first usable address, so reserving the next one
+			// leaves a gateway-only sub-range; host-local reserves the gateway, so
+			// allocation still starts after the reservation.
+			name:     "a reservation right after the gateway leaves a gateway-only range",
+			subnet:   "10.1.100.0/24",
+			base:     &IPAMRange{Subnet: "10.1.100.0/24", Gateway: "10.1.100.1"},
+			reserved: ips("10.1.100.2"),
+			expected: []IPAMRange{
+				{Subnet: "10.1.100.0/24", RangeStart: "10.1.100.1", RangeEnd: "10.1.100.1", Gateway: "10.1.100.1"},
+				{Subnet: "10.1.100.0/24", RangeStart: "10.1.100.3", RangeEnd: "10.1.100.254", Gateway: "10.1.100.1"},
+			},
+		},
+		{
+			name:     "a reservation inside an ip-range splits within its bounds",
+			subnet:   "10.1.100.0/24",
+			base:     &IPAMRange{Subnet: "10.1.100.0/24", Gateway: "10.1.100.1", RangeStart: "10.1.100.1", RangeEnd: "10.1.100.15"},
+			reserved: ips("10.1.100.5"),
+			expected: []IPAMRange{
+				{Subnet: "10.1.100.0/24", RangeStart: "10.1.100.1", RangeEnd: "10.1.100.4", Gateway: "10.1.100.1"},
+				{Subnet: "10.1.100.0/24", RangeStart: "10.1.100.6", RangeEnd: "10.1.100.15", Gateway: "10.1.100.1"},
+			},
+		},
+		{
+			name:     "a reservation outside the ip-range needs no split",
+			subnet:   "10.1.100.0/24",
+			base:     &IPAMRange{Subnet: "10.1.100.0/24", Gateway: "10.1.100.1", RangeStart: "10.1.100.1", RangeEnd: "10.1.100.15"},
+			reserved: ips("10.1.100.200"),
+			expected: []IPAMRange{
+				{Subnet: "10.1.100.0/24", Gateway: "10.1.100.1", RangeStart: "10.1.100.1", RangeEnd: "10.1.100.15"},
+			},
+		},
+		{
+			// Reserving every usable address in the window leaves nothing to hand
+			// out, which is an error rather than an empty range set.
+			name:     "reservations leaving no allocatable address error",
+			subnet:   "10.1.100.0/30",
+			base:     &IPAMRange{Subnet: "10.1.100.0/30", Gateway: "10.1.100.1"},
+			reserved: ips("10.1.100.1", "10.1.100.2"),
+			err:      "leave no allocatable",
+		},
+		{
+			name:     "an IPv6 reservation splits the range around it",
+			subnet:   "2001:db8::/64",
+			base:     &IPAMRange{Subnet: "2001:db8::/64", Gateway: "2001:db8::1"},
+			reserved: ips("2001:db8::5"),
+			// IPv6 has no broadcast, so the last address stays allocatable.
+			expected: []IPAMRange{
+				{Subnet: "2001:db8::/64", RangeStart: "2001:db8::1", RangeEnd: "2001:db8::4", Gateway: "2001:db8::1"},
+				{Subnet: "2001:db8::/64", RangeStart: "2001:db8::6", RangeEnd: "2001:db8::ffff:ffff:ffff:ffff", Gateway: "2001:db8::1"},
+			},
+		},
+	}
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, subnet, err := net.ParseCIDR(tc.subnet)
+			assert.NilError(t, err)
+			got, err := splitIPAMRange(subnet, tc.base, tc.reserved)
+			if tc.err != "" {
+				assert.ErrorContains(t, err, tc.err)
+				return
+			}
+			assert.NilError(t, err)
+			assert.DeepEqual(t, tc.expected, got)
+		})
 	}
 }
 
@@ -328,8 +490,8 @@ func TestNetworkWithDefaultNameAlreadyExists(t *testing.T) {
 	assert.NilError(t, tpl.ExecuteTemplate(buf, "test", values))
 
 	// Filename is irrelevant as long as it's not nerdctl's.
-	testConfFile := filepath.Join(cniConfTestDir, fmt.Sprintf("%s.conf", testutil.Identifier(t)))
-	err = os.WriteFile(testConfFile, buf.Bytes(), 0600)
+	testConfFile := filepath.Join(cniConfTestDir, fmt.Sprintf("%s.conf", t.Name()))
+	err = filesystem.WriteFile(testConfFile, buf.Bytes(), 0600)
 	assert.NilError(t, err)
 
 	// Check network is detected.
@@ -364,4 +526,47 @@ func TestNetworkWithDefaultNameAlreadyExists(t *testing.T) {
 	}
 	assert.Assert(t, len(defaultNamedNetworksFileDefinitions) == 1)
 	assert.Assert(t, defaultNamedNetworksFileDefinitions[0] == testConfFile)
+}
+
+func TestFSExistsPropagatesStatError(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cni-conf-root")
+	assert.NilError(t, filesystem.WriteFile(path, nil, 0600))
+
+	cniEnv := CNIEnv{
+		NetconfPath: path,
+	}
+
+	exists, err := fsExists(&cniEnv, DefaultNetworkName)
+	assert.Assert(t, !exists)
+	assert.Assert(t, err != nil)
+}
+
+func TestListNetworksMatchIncludesPseudoNetworks(t *testing.T) {
+	cniConfTestDir := t.TempDir()
+	cniEnv := CNIEnv{
+		Path:        t.TempDir(),
+		NetconfPath: cniConfTestDir,
+	}
+
+	values := map[string]string{
+		"network_name": "regular-network",
+		"subnet":       "10.7.1.0/24",
+		"gateway":      "10.7.1.1",
+	}
+	tpl, err := template.New("test").Parse(preExistingNetworkConfigTemplate)
+	assert.NilError(t, err)
+	buf := &bytes.Buffer{}
+	assert.NilError(t, tpl.ExecuteTemplate(buf, "test", values))
+
+	testConfFile := filepath.Join(cniConfTestDir, fmt.Sprintf("%s.conf", t.Name()))
+	assert.NilError(t, filesystem.WriteFile(testConfFile, buf.Bytes(), 0600))
+
+	matches, errs := cniEnv.ListNetworksMatch([]string{"host", "none", "regular-network"}, true)
+	assert.Assert(t, len(errs) == 0)
+	assert.Equal(t, len(matches["host"]), 1)
+	assert.Equal(t, matches["host"][0].Name, "host")
+	assert.Equal(t, len(matches["none"]), 1)
+	assert.Equal(t, matches["none"][0].Name, "none")
+	assert.Equal(t, len(matches["regular-network"]), 1)
+	assert.Equal(t, matches["regular-network"][0].Name, "regular-network")
 }

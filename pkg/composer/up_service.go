@@ -31,6 +31,7 @@ import (
 	"github.com/containerd/log"
 
 	"github.com/containerd/nerdctl/v2/pkg/composer/serviceparser"
+	"github.com/containerd/nerdctl/v2/pkg/internal/filesystem"
 	"github.com/containerd/nerdctl/v2/pkg/labels"
 )
 
@@ -102,14 +103,25 @@ func (c *Composer) upServices(ctx context.Context, parsedServices []*servicepars
 }
 
 func (c *Composer) ensureServiceImage(ctx context.Context, ps *serviceparser.Service, allowBuild, forceBuild bool, bo BuildOptions, quiet bool, pullModeArg string) error {
+	pullMode := ps.PullMode
+	if pullModeArg != "" {
+		pullMode = pullModeArg
+	}
+
 	if ps.Build != nil && allowBuild {
 		if ps.Build.Force || forceBuild {
-			return c.buildServiceImage(ctx, ps.Image, ps.Build, ps.Unparsed.Platform, bo)
+			if err := c.buildServiceImage(ctx, ps.Image, ps.Build, ps.Unparsed.Platform, bo); err != nil {
+				return err
+			}
+			return c.ensureImageMountSources(ctx, ps, pullMode, quiet)
 		}
 		if ok, err := c.ImageExists(ctx, ps.Image); err != nil {
 			return err
 		} else if !ok {
-			return c.buildServiceImage(ctx, ps.Image, ps.Build, ps.Unparsed.Platform, bo)
+			if err := c.buildServiceImage(ctx, ps.Image, ps.Build, ps.Unparsed.Platform, bo); err != nil {
+				return err
+			}
+			return c.ensureImageMountSources(ctx, ps, pullMode, quiet)
 		}
 		// even when c.ImageExists returns true, we need to call c.EnsureImage
 		// because ps.PullMode can be "always". So no return here.
@@ -117,10 +129,26 @@ func (c *Composer) ensureServiceImage(ctx context.Context, ps *serviceparser.Ser
 	}
 
 	log.G(ctx).Infof("Ensuring image %s", ps.Image)
-	if pullModeArg != "" {
-		return c.EnsureImage(ctx, ps.Image, pullModeArg, ps.Unparsed.Platform, ps, quiet)
+	if err := c.EnsureImage(ctx, ps.Image, pullMode, ps.Unparsed.Platform, ps, quiet); err != nil {
+		return err
 	}
-	return c.EnsureImage(ctx, ps.Image, ps.PullMode, ps.Unparsed.Platform, ps, quiet)
+	return c.ensureImageMountSources(ctx, ps, pullMode, quiet)
+}
+
+func (c *Composer) ensureImageMountSources(ctx context.Context, ps *serviceparser.Service, pullMode string, quiet bool) error {
+	seen := make(map[serviceparser.ImageMountSource]struct{})
+	for _, source := range ps.ImageMountSources {
+		if _, ok := seen[source]; ok {
+			continue
+		}
+		seen[source] = struct{}{}
+
+		log.G(ctx).Infof("Ensuring image mount source %s", source.Source)
+		if err := c.EnsureImage(ctx, source.Source, pullMode, source.Platform, ps, quiet); err != nil {
+			return fmt.Errorf("failed to ensure image %q for image volume: %w", source.Source, err)
+		}
+	}
+	return nil
 }
 
 // upServiceContainer must be called after ensureServiceImage
@@ -154,6 +182,28 @@ func (c *Composer) upServiceContainer(ctx context.Context, service *serviceparse
 
 	// delete container if it already exists
 	if existingCid != "" {
+		// Default behavior for RecreateDiverged: compare stored hash with current service hash
+		if recreate == RecreateDiverged {
+			currentHash, err := ServiceHash(*service.Unparsed)
+			if err != nil {
+				return "", fmt.Errorf("failed computing service hash for %s: %w", container.Name, err)
+			}
+			con, err := c.client.LoadContainer(ctx, existingCid)
+			if err != nil {
+				return "", fmt.Errorf("failed to load container %s: %w", existingCid, err)
+			}
+			lbls, err := con.Labels(ctx)
+			if err != nil {
+				return "", fmt.Errorf("failed to read labels for %s: %w", existingCid, err)
+			}
+			if lbls[labels.ComposeConfigHash] == currentHash {
+				cmd := c.createNerdctlCmd(ctx, append([]string{"start"}, existingCid)...)
+				if err := c.executeUpCmd(ctx, cmd, container.Name, runFlagD, service.Unparsed.StdinOpen); err != nil {
+					return "", fmt.Errorf("error while starting existing container %s: %w", container.Name, err)
+				}
+				return existingCid, nil
+			}
+		}
 		log.G(ctx).Debugf("Container %q already exists, deleting", container.Name)
 		delCmd := c.createNerdctlCmd(ctx, "rm", "-f", container.Name)
 		if err = delCmd.Run(); err != nil {
@@ -183,10 +233,15 @@ func (c *Composer) upServiceContainer(ctx context.Context, service *serviceparse
 	}
 
 	//add metadata labels to container https://github.com/compose-spec/compose-spec/blob/master/spec.md#labels
+	currentHash, err := ServiceHash(*service.Unparsed)
+	if err != nil {
+		return "", fmt.Errorf("failed computing service hash for %s: %w", container.Name, err)
+	}
 	container.RunArgs = append([]string{
 		"--cidfile=" + cidFilename,
 		fmt.Sprintf("-l=%s=%s", labels.ComposeProject, c.project.Name),
 		fmt.Sprintf("-l=%s=%s", labels.ComposeService, service.Unparsed.Name),
+		fmt.Sprintf("-l=%s=%s", labels.ComposeConfigHash, currentHash),
 	}, container.RunArgs...)
 
 	cmd := c.createNerdctlCmd(ctx, append([]string{"run"}, container.RunArgs...)...)
@@ -198,7 +253,7 @@ func (c *Composer) upServiceContainer(ctx context.Context, service *serviceparse
 		return "", fmt.Errorf("error while creating container %s: %w", container.Name, err)
 	}
 
-	cid, err := os.ReadFile(cidFilename)
+	cid, err := filesystem.ReadFile(cidFilename)
 	if err != nil {
 		return "", fmt.Errorf("error while creating container %s: %w", container.Name, err)
 	}

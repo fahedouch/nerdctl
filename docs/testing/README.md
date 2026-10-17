@@ -5,6 +5,9 @@ and principles about writing tests.
 
 For more comprehensive information about nerdctl test tools, see [tools.md](tools.md).
 
+For flaky tests - how the CI reports them, and what to do about them - see
+[flaky.md](flaky.md).
+
 ## Code, fix, lint, rinse, repeat
 
 ```
@@ -30,6 +33,13 @@ eg:
 `LINT_COMMIT_RANGE=target_branch..HEAD make lint-commits`
 or
 `LINT_COMMIT_RANGE=target_branch..HEAD make lint`
+
+`make lint` also runs [gomodjail](https://github.com/AkihiroSuda/gomodjail) in its static analysis
+mode (`make lint-gomodjail-all`), to verify that the modules annotated `gomodjail:confined` in
+`go.mod` cannot reach a denied capability (filesystem, network, process execution, raw syscalls,
+OS state modification, or cgo). If a dependency bump makes a confined module reach one of those,
+`make fix` (or `make fix-gomodjail`) downgrades its annotation to `gomodjail:unconfined`, so that
+the decision stays visible in `go.mod`.
 
 ## Unit testing
 
@@ -76,11 +86,25 @@ Note that this is different from the `--parallel` flag, which controls the amoun
 parallelization that a single go test binary will use when faced with tests that do
 explicitly allow it (with a call to `t.Parallel()`).
 
-### Or test in a container
+### Or provision a test environment with Docker-built artifacts
+
+Docker can be used to build all the dependencies needed to run the integration tests
+(containerd, runc, CNI plugins, BuildKit, snapshotters, etc.), which can then be installed
+on the host (this is what the CI does). These scripts substantially and irreversibly modify
+the host, so they refuse to run unless `GITHUB_ACTIONS=true` is set - only do this on a
+disposable machine:
 
 ```bash
-docker build -t test-integration --target test-integration .
-docker run -t --rm --privileged test-integration
+docker buildx build --target out-test-integration-artifacts --output type=local,dest=/tmp/nerdctl-test-artifacts .
+sudo env GITHUB_ACTIONS=true ./hack/provisioning/linux/test-integration-env.sh install /tmp/nerdctl-test-artifacts rootful
+./hack/test-integration.sh -test.target=nerdctl -test.only-flaky=false
+```
+
+For rootless (`rootless`, or `rootless-port-slirp4netns`):
+
+```bash
+sudo env GITHUB_ACTIONS=true ./hack/provisioning/linux/test-integration-env.sh install /tmp/nerdctl-test-artifacts rootless
+GITHUB_ACTIONS=true ./hack/test-integration-rootless.sh ./hack/test-integration.sh -test.target=nerdctl -test.only-flaky=false
 ```
 
 ### Principles
@@ -90,9 +114,9 @@ docker run -t --rm --privileged test-integration
 ##### General case
 
 It should be possible to parallelize all tests - as such, please make sure you:
-- name all resources your test is manipulating after the test identifier (`testutil.Identifier(t)`)
+- name all resources your test is manipulating after the test identifier (`data.Identifier()`)
 to guarantee your test will not interact with other tests
-- do NOT use `os.Setenv` - instead, add into `base.Env`
+- do NOT use `os.Setenv` - instead, use `Setenv` on the command you are running
 - use `t.Parallel()` at the beginning of your test (and subtests as well of course)
 - in the very exceptional case where your test for some reason can NOT be parallelized, be sure to mark it explicitly as such
 with a comment explaining why
@@ -100,9 +124,7 @@ with a comment explaining why
 ##### For "blanket" destructive operations
 
 If you are going to use blanket destructive operations (like `prune`), please:
-- use a dedicated namespace: instead of calling `testutil.Base`, call `testutil.BaseWithNamespace` 
-and be sure that your namespace is named after the test id
-- remove the namespace in your test `Cleanup`
+- use a dedicated namespace: add `nerdtest.Private` to the test `Require`ments
 - since docker does not support namespaces, be sure to:
   - only enable `Parallel` if the target is NOT docker: `	if !nerdtest.IsDocker() { t.Parallel() }`
   - double check that what you do in the default namespace is safe

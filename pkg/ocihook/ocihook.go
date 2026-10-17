@@ -24,26 +24,29 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	types100 "github.com/containernetworking/cni/pkg/types/100"
 	"github.com/opencontainers/runtime-spec/specs-go"
 	b4nndclient "github.com/rootless-containers/bypass4netns/pkg/api/daemon/client"
-	rlkclient "github.com/rootless-containers/rootlesskit/v2/pkg/api/client"
+	rlkclient "github.com/rootless-containers/rootlesskit/v3/pkg/api/client"
 
 	"github.com/containerd/go-cni"
 	"github.com/containerd/log"
 
 	"github.com/containerd/nerdctl/v2/pkg/bypass4netnsutil"
 	"github.com/containerd/nerdctl/v2/pkg/dnsutil/hostsstore"
+	"github.com/containerd/nerdctl/v2/pkg/internal/filesystem"
 	"github.com/containerd/nerdctl/v2/pkg/labels"
-	"github.com/containerd/nerdctl/v2/pkg/lockutil"
 	"github.com/containerd/nerdctl/v2/pkg/namestore"
 	"github.com/containerd/nerdctl/v2/pkg/netutil"
 	"github.com/containerd/nerdctl/v2/pkg/netutil/nettype"
 	"github.com/containerd/nerdctl/v2/pkg/ocihook/state"
+	"github.com/containerd/nerdctl/v2/pkg/portutil"
 	"github.com/containerd/nerdctl/v2/pkg/rootlessutil"
 	"github.com/containerd/nerdctl/v2/pkg/store"
 )
@@ -103,15 +106,17 @@ func Run(stdin io.Reader, stderr io.Writer, event, dataStore, cniPath, cniNetcon
 	// This below is a stopgap solution that just enforces a global lock
 	// Note this here is probably not enough, as concurrent CNI operations may happen outside of the scope of ocihooks
 	// through explicit calls to Remove, etc.
+	// Finally note that this is not the same (albeit similar) as libcni filesystem manipulation locking,
+	// hence the independent lock
 	err = os.MkdirAll(cniNetconfPath, 0o700)
 	if err != nil {
 		return err
 	}
-	lock, err := lockutil.Lock(filepath.Join(cniNetconfPath, ".nerdctl.lock"))
+	lock, err := filesystem.Lock(filepath.Join(cniNetconfPath, ".cni-concurrency.lock"))
 	if err != nil {
 		return err
 	}
-	defer lockutil.Unlock(lock)
+	defer filesystem.Unlock(lock)
 
 	opts, err := newHandlerOpts(&state, dataStore, cniPath, cniNetconfPath, bridgeIP)
 	if err != nil {
@@ -205,11 +210,11 @@ func newHandlerOpts(state *specs.State, dataStore, cniPath, cniNetconfPath, brid
 		}
 	}
 
-	if portsJSON := o.state.Annotations[labels.Ports]; portsJSON != "" {
-		if err := json.Unmarshal([]byte(portsJSON), &o.ports); err != nil {
-			return nil, err
-		}
+	ports, err := portutil.LoadPortMappings(o.dataStore, namespace, o.state.ID, o.state.Annotations)
+	if err != nil {
+		return nil, err
 	}
+	o.ports = ports
 
 	if ipAddress, ok := o.state.Annotations[labels.IPAddress]; ok {
 		o.containerIP = ipAddress
@@ -416,10 +421,110 @@ func getIP6AddressOpts(opts *handlerOpts) ([]cni.NamespaceOpts, error) {
 	return nil, nil
 }
 
-func applyNetworkSettings(opts *handlerOpts) error {
+func reserveSocket(protocol, hostAddr string) (*os.File, error) {
+	type filer interface {
+		File() (*os.File, error)
+	}
+	var f filer
+	switch {
+	case strings.HasPrefix(protocol, "tcp"):
+		l, err := net.Listen(protocol, hostAddr)
+		if err != nil {
+			return nil, err
+		}
+		defer l.Close()
+		var ok bool
+		f, ok = l.(filer)
+		if !ok {
+			return nil, fmt.Errorf("cannot get file descriptor from the listener of type %T", l)
+		}
+	case strings.HasPrefix(protocol, "udp"):
+		l, err := net.ListenPacket(protocol, hostAddr)
+		if err != nil {
+			return nil, err
+		}
+		defer l.Close()
+		var ok bool
+		f, ok = l.(filer)
+		if !ok {
+			return nil, fmt.Errorf("cannot get file descriptor from the listener of type %T", l)
+		}
+	default:
+		return nil, fmt.Errorf("unsupported protocol %q", protocol)
+	}
+	return f.File()
+}
+
+// portReserverPidFilePath returns /run/nerdctl/<namespace>/<id>/port-reserver.pid
+func portReserverPidFilePath(namespace, id string) string {
+	return filepath.Join("/run/nerdctl/", namespace, id, "port-reserver.pid")
+}
+
+func CleanupPortReserverProcess(namespace, id string) error {
+	// In rootless mode, port-reserver is handled by Rootlesskit, so no cleanup is needed.
+	if rootlessutil.IsRootlessChild() {
+		return nil
+	}
+
+	pidFile := portReserverPidFilePath(namespace, id)
+	if err := killProcessByPidFile(pidFile); err != nil {
+		return err
+	}
+	if err := os.RemoveAll(filepath.Dir(pidFile)); err != nil {
+		log.L.WithError(err).Errorf("failed to remove the port-reserver directory %s", filepath.Dir(pidFile))
+	}
+	return nil
+}
+
+func applyNetworkSettings(opts *handlerOpts) (err error) {
 	portMapOpts, err := getPortMapOpts(opts)
 	if err != nil {
 		return err
+	}
+	if !rootlessutil.IsRootlessChild() && len(opts.ports) > 0 {
+		// When running in rootful mode, reserve the ports on the host
+		// so that the ports appears on /proc/net/tcp.
+		//
+		// This also prevents other processes from binding to the same ports.
+		//
+		// Note that in rootless mode this is not necessary because
+		// RootlessKit's port driver already reserves the ports.
+		//
+		// See https://github.com/lima-vm/lima/issues/4085
+		//
+		// Similar patterns are used in Docker and Podman.
+		// - https://github.com/moby/moby/pull/48132
+		// - https://github.com/containers/podman/pull/23446
+		reserverCmd := exec.Command("sleep", "infinity")
+		for _, p := range opts.ports {
+			protocol := p.Protocol
+			if !strings.HasSuffix(protocol, "4") && !strings.HasSuffix(protocol, "6") {
+				// e.g. "tcp" -> "tcp4"
+				protocol += "4"
+			}
+			hostAddr := net.JoinHostPort(p.HostIP, strconv.Itoa(int(p.HostPort)))
+			f, err := reserveSocket(protocol, hostAddr)
+			if err != nil {
+				log.L.WithError(err).Warnf("cannot reserve the port %s/%s", hostAddr, protocol)
+				continue
+			}
+			reserverCmd.ExtraFiles = append(reserverCmd.ExtraFiles, f)
+		}
+		if err := reserverCmd.Start(); err != nil {
+			return fmt.Errorf("cannot start the port reserver process: %w", err)
+		}
+		reserverCmdPid := reserverCmd.Process.Pid
+		log.L.Debugf("started the port reserver process (pid=%d)", reserverCmdPid)
+		defer func() {
+			if err != nil {
+				log.L.Debugf("killing the port reserver process (pid=%d)", reserverCmdPid)
+				_ = reserverCmd.Process.Kill()
+				_ = os.RemoveAll(filepath.Dir(portReserverPidFilePath(opts.state.Annotations[labels.Namespace], opts.state.ID)))
+			}
+		}()
+		if err := writePidFile(portReserverPidFilePath(opts.state.Annotations[labels.Namespace], opts.state.ID), reserverCmdPid); err != nil {
+			return fmt.Errorf("cannot write the pid file of the port reserver process: %w", err)
+		}
 	}
 	nsPath, err := getNetNSPath(opts.state)
 	if err != nil {
@@ -473,10 +578,19 @@ func applyNetworkSettings(opts *handlerOpts) error {
 	// See https://github.com/containerd/nerdctl/issues/3355
 	_ = opts.cni.Remove(ctx, opts.fullID, "", namespaceOpts...)
 
+	// Defer CNI configuration removal to ensure idempotency of oci-hook.
+	defer func() {
+		if err != nil {
+			log.L.Warn("Container failed starting. Removing allocated network configuration.")
+			_ = opts.cni.Remove(ctx, opts.fullID, nsPath, namespaceOpts...)
+		}
+	}()
+
 	cniRes, err := opts.cni.Setup(ctx, opts.fullID, nsPath, namespaceOpts...)
 	if err != nil {
 		return fmt.Errorf("failed to call cni.Setup: %w", err)
 	}
+
 	cniResRaw := cniRes.Raw()
 	for i, cniName := range opts.cniNames {
 		hsMeta.Networks[cniName] = cniResRaw[i]
@@ -620,6 +734,15 @@ func onPostStop(opts *handlerOpts) error {
 			log.L.WithError(err).Errorf("failed to call cni.Remove")
 			return err
 		}
+
+		// opts.cni.Remove has trouble removing network configurations when netns is empty.
+		// Therefore, we force the deletion of iptables rules here to prevent netns exhaustion.
+		// This is a workaround until https://github.com/containernetworking/plugins/pull/1078 is merged.
+		if err := cleanupIptablesRules(opts.fullID, opts.cniNames); err != nil {
+			log.L.WithError(err).Warnf("failed to clean up iptables rules for container %s", opts.fullID)
+			// Don't return error here, continue with the rest of the cleanup
+		}
+
 		hs, err := hostsstore.New(opts.dataStore, ns)
 		if err != nil {
 			return err
@@ -637,6 +760,10 @@ func onPostStop(opts *handlerOpts) error {
 	if err := namst.Release(name, opts.state.ID); err != nil && !errors.Is(err, store.ErrNotFound) {
 		return fmt.Errorf("failed to release container name %s: %w", name, err)
 	}
+	// Kill port-reserver process if any
+	if err = CleanupPortReserverProcess(ns, opts.state.ID); err != nil {
+		log.L.WithError(err).Errorf("failed to kill the port-reserver process")
+	}
 	return nil
 }
 
@@ -647,7 +774,11 @@ func writePidFile(path string, pid int) error {
 	if err != nil {
 		return err
 	}
-	tempPath := filepath.Join(filepath.Dir(path), fmt.Sprintf(".%s", filepath.Base(path)))
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	tempPath := filepath.Join(dir, fmt.Sprintf(".%s", filepath.Base(path)))
 	f, err := os.OpenFile(tempPath, os.O_RDWR|os.O_CREATE|os.O_EXCL|os.O_SYNC, 0666)
 	if err != nil {
 		return err
@@ -658,4 +789,26 @@ func writePidFile(path string, pid int) error {
 		return err
 	}
 	return os.Rename(tempPath, path)
+}
+
+func killProcessByPidFile(pidFile string) error {
+	pidData, err := os.ReadFile(pidFile)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			err = nil
+		}
+		return err
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(pidData)))
+	if err != nil {
+		return fmt.Errorf("failed to parse pid %q from %q: %w", string(pidData), pidFile, err)
+	}
+	proc, err := os.FindProcess(pid)
+	if err != nil {
+		return fmt.Errorf("failed to find process %d: %w", pid, err)
+	}
+	if err := proc.Kill(); err != nil {
+		return fmt.Errorf("failed to kill process %d: %w", pid, err)
+	}
+	return nil
 }

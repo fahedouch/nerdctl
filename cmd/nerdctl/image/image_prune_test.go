@@ -18,8 +18,6 @@ package image
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -29,6 +27,7 @@ import (
 	"github.com/containerd/nerdctl/mod/tigron/expect"
 	"github.com/containerd/nerdctl/mod/tigron/require"
 	"github.com/containerd/nerdctl/mod/tigron/test"
+	"github.com/containerd/nerdctl/mod/tigron/tig"
 
 	"github.com/containerd/nerdctl/v2/pkg/testutil"
 	"github.com/containerd/nerdctl/v2/pkg/testutil/nerdtest"
@@ -72,14 +71,13 @@ func TestImagePrune(t *testing.T) {
 					`, testutil.CommonImage)
 
 				buildCtx := data.Temp().Path()
-				err := os.WriteFile(filepath.Join(buildCtx, "Dockerfile"), []byte(dockerfile), 0o600)
-				assert.NilError(helpers.T(), err)
+				data.Temp().Save(dockerfile, "Dockerfile")
 				helpers.Ensure("build", buildCtx)
 				// After we rebuild with tag, docker will no longer show the <none> version from above
 				// Swapping order does not change anything.
 				helpers.Ensure("build", "-t", identifier, buildCtx)
 				imgList := helpers.Capture("images")
-				assert.Assert(t, strings.Contains(imgList, "<none>"), "Missing <none>")
+				assert.Assert(t, strings.Contains(imgList, "<untagged>"), "Missing <untagged>")
 				assert.Assert(t, strings.Contains(imgList, identifier), "Missing "+identifier)
 			},
 			Command: test.Command("image", "prune", "--force"),
@@ -87,13 +85,13 @@ func TestImagePrune(t *testing.T) {
 				identifier := data.Identifier()
 				return &test.Expected{
 					Output: expect.All(
-						func(stdout string, info string, t *testing.T) {
-							assert.Assert(t, !strings.Contains(stdout, identifier), info)
+						func(stdout string, t tig.T) {
+							assert.Assert(t, !strings.Contains(stdout, identifier))
 						},
-						func(stdout string, info string, t *testing.T) {
+						func(stdout string, t tig.T) {
 							imgList := helpers.Capture("images")
-							assert.Assert(t, !strings.Contains(imgList, "<none>"), imgList)
-							assert.Assert(t, strings.Contains(imgList, identifier), info)
+							assert.Assert(t, !strings.Contains(imgList, "<untagged>"), imgList)
+							assert.Assert(t, strings.Contains(imgList, identifier))
 						},
 					),
 				}
@@ -120,12 +118,11 @@ func TestImagePrune(t *testing.T) {
 					`, testutil.CommonImage)
 
 				buildCtx := data.Temp().Path()
-				err := os.WriteFile(filepath.Join(buildCtx, "Dockerfile"), []byte(dockerfile), 0o600)
-				assert.NilError(helpers.T(), err)
+				data.Temp().Save(dockerfile, "Dockerfile")
 				helpers.Ensure("build", buildCtx)
 				helpers.Ensure("build", "-t", identifier, buildCtx)
 				imgList := helpers.Capture("images")
-				assert.Assert(t, strings.Contains(imgList, "<none>"), "Missing <none>")
+				assert.Assert(t, strings.Contains(imgList, "<untagged>"), "Missing <untagged>")
 				assert.Assert(t, strings.Contains(imgList, identifier), "Missing "+identifier)
 				helpers.Ensure("run", "--name", identifier, identifier)
 			},
@@ -133,18 +130,18 @@ func TestImagePrune(t *testing.T) {
 			Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
 				return &test.Expected{
 					Output: expect.All(
-						func(stdout string, info string, t *testing.T) {
-							assert.Assert(t, !strings.Contains(stdout, data.Identifier()), info)
+						func(stdout string, t tig.T) {
+							assert.Assert(t, !strings.Contains(stdout, data.Identifier()))
 						},
-						func(stdout string, info string, t *testing.T) {
+						func(stdout string, t tig.T) {
 							imgList := helpers.Capture("images")
-							assert.Assert(t, strings.Contains(imgList, data.Identifier()), info)
-							assert.Assert(t, !strings.Contains(imgList, "<none>"), imgList)
+							assert.Assert(t, strings.Contains(imgList, data.Identifier()))
+							assert.Assert(t, !strings.Contains(imgList, "<untagged>"), imgList)
 							helpers.Ensure("rm", "-f", data.Identifier())
 							removed := helpers.Capture("image", "prune", "--force", "--all")
-							assert.Assert(t, strings.Contains(removed, data.Identifier()), info)
+							assert.Assert(t, strings.Contains(removed, data.Identifier()))
 							imgList = helpers.Capture("images")
-							assert.Assert(t, !strings.Contains(imgList, data.Identifier()), info)
+							assert.Assert(t, !strings.Contains(imgList, data.Identifier()))
 						},
 					),
 				}
@@ -164,8 +161,7 @@ CMD ["echo", "nerdctl-test-image-prune-filter-label"]
 LABEL foo=bar
 LABEL version=0.1`, testutil.CommonImage)
 				buildCtx := data.Temp().Path()
-				err := os.WriteFile(filepath.Join(buildCtx, "Dockerfile"), []byte(dockerfile), 0o600)
-				assert.NilError(helpers.T(), err)
+				data.Temp().Save(dockerfile, "Dockerfile")
 				helpers.Ensure("build", "-t", data.Identifier(), buildCtx)
 				imgList := helpers.Capture("images")
 				assert.Assert(t, strings.Contains(imgList, data.Identifier()), "Missing "+data.Identifier())
@@ -174,18 +170,18 @@ LABEL version=0.1`, testutil.CommonImage)
 			Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
 				return &test.Expected{
 					Output: expect.All(
-						func(stdout string, info string, t *testing.T) {
-							assert.Assert(t, !strings.Contains(stdout, data.Identifier()), info)
+						func(stdout string, t tig.T) {
+							assert.Assert(t, !strings.Contains(stdout, data.Identifier()))
 						},
-						func(stdout string, info string, t *testing.T) {
+						func(stdout string, t tig.T) {
 							imgList := helpers.Capture("images")
-							assert.Assert(t, strings.Contains(imgList, data.Identifier()), info)
+							assert.Assert(t, strings.Contains(imgList, data.Identifier()))
 						},
-						func(stdout string, info string, t *testing.T) {
+						func(stdout string, t tig.T) {
 							prune := helpers.Capture("image", "prune", "--force", "--all", "--filter", "label=foo=bar")
-							assert.Assert(t, strings.Contains(prune, data.Identifier()), info)
+							assert.Assert(t, strings.Contains(prune, data.Identifier()))
 							imgList := helpers.Capture("images")
-							assert.Assert(t, !strings.Contains(imgList, data.Identifier()), info)
+							assert.Assert(t, !strings.Contains(imgList, data.Identifier()))
 						},
 					),
 				}
@@ -204,8 +200,7 @@ LABEL version=0.1`, testutil.CommonImage)
 RUN echo "Anything, so that we create actual content for docker to set the current time for CreatedAt"
 CMD ["echo", "nerdctl-test-image-prune-until"]`, testutil.CommonImage)
 				buildCtx := data.Temp().Path()
-				err := os.WriteFile(filepath.Join(buildCtx, "Dockerfile"), []byte(dockerfile), 0o600)
-				assert.NilError(helpers.T(), err)
+				data.Temp().Save(dockerfile, "Dockerfile")
 				helpers.Ensure("build", "-t", data.Identifier(), buildCtx)
 				imgList := helpers.Capture("images")
 				assert.Assert(t, strings.Contains(imgList, data.Identifier()), "Missing "+data.Identifier())
@@ -216,9 +211,9 @@ CMD ["echo", "nerdctl-test-image-prune-until"]`, testutil.CommonImage)
 				return &test.Expected{
 					Output: expect.All(
 						expect.DoesNotContain(data.Labels().Get("imageID")),
-						func(stdout string, info string, t *testing.T) {
+						func(stdout string, t tig.T) {
 							imgList := helpers.Capture("images")
-							assert.Assert(t, strings.Contains(imgList, data.Labels().Get("imageID")), info)
+							assert.Assert(t, strings.Contains(imgList, data.Labels().Get("imageID")))
 						},
 					),
 				}
@@ -235,9 +230,9 @@ CMD ["echo", "nerdctl-test-image-prune-until"]`, testutil.CommonImage)
 						return &test.Expected{
 							Output: expect.All(
 								expect.Contains(data.Labels().Get("imageID")),
-								func(stdout string, info string, t *testing.T) {
+								func(stdout string, t tig.T) {
 									imgList := helpers.Capture("images")
-									assert.Assert(t, !strings.Contains(imgList, data.Labels().Get("imageID")), imgList, info)
+									assert.Assert(t, !strings.Contains(imgList, data.Labels().Get("imageID")), imgList)
 								},
 							),
 						}

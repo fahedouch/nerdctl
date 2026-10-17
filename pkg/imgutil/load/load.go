@@ -20,19 +20,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"strings"
+	"time"
 
 	containerd "github.com/containerd/containerd/v2/client"
 	"github.com/containerd/containerd/v2/core/images"
-	"github.com/containerd/containerd/v2/core/images/archive"
-	"github.com/containerd/containerd/v2/pkg/archive/compression"
+	"github.com/containerd/containerd/v2/core/transfer"
+	tarchive "github.com/containerd/containerd/v2/core/transfer/archive"
+	transferimage "github.com/containerd/containerd/v2/core/transfer/image"
 	"github.com/containerd/platforms"
 
 	"github.com/containerd/nerdctl/v2/pkg/api/types"
-	"github.com/containerd/nerdctl/v2/pkg/imgutil"
 	"github.com/containerd/nerdctl/v2/pkg/platformutil"
+	"github.com/containerd/nerdctl/v2/pkg/transferutil"
 )
 
 // FromArchive loads and unpacks the images from the tar archive specified in image load options.
@@ -54,27 +55,45 @@ func FromArchive(ctx context.Context, client *containerd.Client, options types.I
 			return nil, errors.New("stdin is empty and input flag is not specified")
 		}
 	}
-	decompressor, err := compression.DecompressStream(options.Stdin)
+
+	if _, err := platformutil.NewMatchComparer(options.AllPlatforms, options.Platform); err != nil {
+		return nil, err
+	}
+
+	imageService := client.ImageService()
+	beforeImages, err := imageService.List(ctx)
 	if err != nil {
 		return nil, err
 	}
-	platMC, err := platformutil.NewMatchComparer(options.AllPlatforms, options.Platform)
-	if err != nil {
-		return nil, err
+	beforeSet := make(map[string]bool)
+	for _, img := range beforeImages {
+		beforeSet[img.Name] = true
 	}
-	imgs, err := importImages(ctx, client, decompressor, options.GOptions.Snapshotter, platMC)
-	if err != nil {
-		return nil, err
-	}
-	unpackedImages := make([]images.Image, 0, len(imgs))
-	for _, img := range imgs {
-		err := unpackImage(ctx, client, img, platMC, options)
+
+	var storeOpts []transferimage.StoreOpt
+	platUnpack := platforms.DefaultSpec()
+	if len(options.Platform) > 0 {
+		p, err := platforms.Parse(options.Platform[0])
 		if err != nil {
-			return unpackedImages, fmt.Errorf("error unpacking image (%s): %w", img.Name, err)
+			return nil, fmt.Errorf("invalid platform %q: %w", options.Platform[0], err)
 		}
-		unpackedImages = append(unpackedImages, img)
+		platUnpack = p
+		storeOpts = append(storeOpts, transferimage.WithPlatforms(p))
+	} else if !options.AllPlatforms {
+		storeOpts = append(storeOpts, transferimage.WithPlatforms(platUnpack))
 	}
-	return unpackedImages, nil
+	storeOpts = append(storeOpts, transferimage.WithUnpack(platUnpack, options.GOptions.Snapshotter))
+	storeOpts = append(storeOpts, transferimage.WithDigestRef("import", true, true))
+	storeOpts = append(storeOpts, transferimage.WithNamedPrefix(fmt.Sprintf("import-%s", time.Now().Format("2006-01-02")), true))
+
+	pf, done, loadedImages := transferutil.ProgressHandlerLoadImage(ctx, client, beforeSet, options)
+	err = client.Transfer(ctx,
+		tarchive.NewImageImportStream(options.Stdin, ""),
+		transferimage.NewStore("", storeOpts...),
+		transfer.WithProgress(pf),
+	)
+	done()
+	return *loadedImages, err
 }
 
 // FromOCIArchive loads and unpacks the images from the OCI formatted archive at the provided file system path.
@@ -94,58 +113,4 @@ func FromOCIArchive(ctx context.Context, client *containerd.Client, pathToOCIArc
 	options.Input = pathToOCIArchive
 
 	return FromArchive(ctx, client, options)
-}
-
-type readCounter struct {
-	io.Reader
-	N int
-}
-
-func (r *readCounter) Read(p []byte) (int, error) {
-	n, err := r.Reader.Read(p)
-	if n > 0 {
-		r.N += n
-	}
-	return n, err
-}
-
-func importImages(ctx context.Context, client *containerd.Client, in io.Reader, snapshotter string, platformMC platforms.MatchComparer) ([]images.Image, error) {
-	// In addition to passing WithImagePlatform() to client.Import(), we also need to pass WithDefaultPlatform() to NewClient().
-	// Otherwise unpacking may fail.
-	r := &readCounter{Reader: in}
-	imgs, err := client.Import(ctx, r,
-		containerd.WithDigestRef(archive.DigestTranslator(snapshotter)),
-		containerd.WithSkipDigestRef(func(name string) bool { return name != "" }),
-		containerd.WithImportPlatform(platformMC),
-	)
-	if err != nil {
-		if r.N == 0 {
-			// Avoid confusing "unrecognized image format"
-			return nil, errors.New("no image was built")
-		}
-		if errors.Is(err, images.ErrEmptyWalk) {
-			err = fmt.Errorf("%w (Hint: set `--platform=PLATFORM` or `--all-platforms`)", err)
-		}
-		return nil, err
-	}
-	return imgs, nil
-}
-
-func unpackImage(ctx context.Context, client *containerd.Client, model images.Image, platform platforms.MatchComparer, options types.ImageLoadOptions) error {
-	image := containerd.NewImageWithPlatform(client, model, platform)
-
-	if !options.Quiet {
-		fmt.Fprintf(options.Stdout, "unpacking %s (%s)...\n", model.Name, model.Target.Digest)
-	}
-
-	err := image.Unpack(ctx, options.GOptions.Snapshotter)
-	if err != nil {
-		return err
-	}
-
-	// Loaded message is shown even when quiet.
-	repo, tag := imgutil.ParseRepoTag(model.Name)
-	fmt.Fprintf(options.Stdout, "Loaded image: %s:%s\n", repo, tag)
-
-	return nil
 }

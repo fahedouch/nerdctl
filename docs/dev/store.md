@@ -23,7 +23,7 @@ containers can be named the same), etc.
 However, storing data on the filesystem in a reliable way comes with challenges:
 - incomplete writes may happen (because of a system restart, or an application crash), leaving important structured files
 in a broken state
-- concurrent writes, or reading while writing would obviously be a problem as well, be it accross goroutines, or between
+- concurrent writes, or reading while writing would obviously be a problem as well, be it across goroutines, or between
 concurrent executions of the nerdctl binary, or embedded in a third-party application that does concurrently access resources
 
 The `pkg/store` package does provide a "storage" abstraction that takes care of these issues, generally providing
@@ -144,7 +144,7 @@ Users of the `namestore` do not have to bother with locking. These methods are s
 This is a good example of how to leverage core store primitives to implement a developer friendly, safe storage for
 "something" (in that case "names").
 
-Finaly note an important point - mentioned above: locking should be done to the smallest possible "segment" of sub-directories.
+Finally note an important point - mentioned above: locking should be done to the smallest possible "segment" of sub-directories.
 Specifically, any store should lock only - at most - resources under the _namespace_ being manipulated.
 
 For example, a container lifecycle storage should not lock out any other container, but only its own private directory.

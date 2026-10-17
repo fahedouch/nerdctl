@@ -31,10 +31,18 @@ type NetworkCreateOptions struct {
 	IPAMDriver  string
 	IPAMOptions map[string]string
 	Subnets     []string
-	Gateway     string
-	IPRange     string
-	Labels      []string
-	IPv6        bool
+	Gateway     []string
+	IPRange     []string
+	// AuxAddresses holds "name=IP" auxiliary addresses (docker --aux-address).
+	// Each IP is reserved so IPAM never hands it out to a container.
+	AuxAddresses []string
+	Labels       []string
+	IPv6         bool
+	// IPv4 enables IPv4 on the network. A nil value defaults to enabled, so a
+	// directly-constructed NetworkCreateOptions keeps IPv4 on; setting it to
+	// false together with IPv6 yields an IPv6-only network.
+	IPv4     *bool
+	Internal bool
 }
 
 // NetworkInspectOptions specifies options for `nerdctl network inspect`.

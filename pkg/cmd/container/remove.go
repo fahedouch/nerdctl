@@ -34,11 +34,13 @@ import (
 	"github.com/containerd/nerdctl/v2/pkg/clientutil"
 	"github.com/containerd/nerdctl/v2/pkg/containerutil"
 	"github.com/containerd/nerdctl/v2/pkg/dnsutil/hostsstore"
+	"github.com/containerd/nerdctl/v2/pkg/healthcheck"
 	"github.com/containerd/nerdctl/v2/pkg/idutil/containerwalker"
 	"github.com/containerd/nerdctl/v2/pkg/ipcutil"
 	"github.com/containerd/nerdctl/v2/pkg/labels"
 	"github.com/containerd/nerdctl/v2/pkg/mountutil/volumestore"
 	"github.com/containerd/nerdctl/v2/pkg/namestore"
+	"github.com/containerd/nerdctl/v2/pkg/portutil"
 	"github.com/containerd/nerdctl/v2/pkg/store"
 )
 
@@ -105,6 +107,13 @@ func RemoveContainer(ctx context.Context, c containerd.Container, globalOptions 
 	containerLabels, err := c.Labels(ctx)
 	if err != nil {
 		return err
+	}
+
+	// Capture the container's snapshotter before deletion: image-mount views were
+	// created against it, which may differ from the current --snapshotter flag.
+	imageMountSnapshotter := globalOptions.Snapshotter
+	if info, err := c.Info(ctx); err == nil && info.Snapshotter != "" {
+		imageMountSnapshotter = info.Snapshotter
 	}
 
 	// Get datastore
@@ -178,6 +187,11 @@ func RemoveContainer(ctx context.Context, c containerd.Container, globalOptions 
 		// Otherwise, nil the error so that we do not write the error label on the container
 		retErr = nil
 
+		// Clean up healthcheck systemd units
+		if err := healthcheck.RemoveTransientHealthCheckFiles(ctx, c); err != nil {
+			log.G(ctx).WithError(err).Warnf("failed to clean up healthcheck units for container %q", id)
+		}
+
 		// Now, delete the actual container
 		var delOpts []containerd.DeleteOpts
 		if _, err := c.Image(ctx); err == nil {
@@ -189,9 +203,14 @@ func RemoveContainer(ctx context.Context, c containerd.Container, globalOptions 
 			retErr = err
 			return
 		}
-
 		netOpts, err := containerutil.NetworkOptionsFromSpec(spec)
 		if err == nil {
+			portSlice, err := portutil.LoadPortMappings(dataStore, globalOptions.Namespace, id, containerLabels)
+			if err != nil {
+				retErr = err
+				return
+			}
+			netOpts.PortMappings = portSlice
 			networkManager, err := containerutil.NewNetworkingOptionsManager(globalOptions, netOpts, client)
 			if err != nil {
 				retErr = fmt.Errorf("failed to instantiate network options manager: %w", err)
@@ -232,8 +251,11 @@ func RemoveContainer(ctx context.Context, c containerd.Container, globalOptions 
 		hs, err := hostsstore.New(dataStore, containerNamespace)
 		if err != nil {
 			log.G(ctx).WithError(err).Warnf("failed to instantiate hostsstore for %q", containerNamespace)
-		} else if err = hs.Delete(id); err != nil {
+		} else if err = hs.Delete(id); err != nil && !errors.Is(err, store.ErrNotFound) {
 			// De-allocate hosts file - soft failure
+			// Some platforms and network modes never allocate a hosts file for the container in the first
+			// place (e.g. Windows containers), so ignore NotFound errors here, similarly to the
+			// nameStore.Release call above.
 			log.G(ctx).WithError(err).Warnf("failed to remove hosts file for container %q", id)
 		}
 
@@ -255,6 +277,23 @@ func RemoveContainer(ctx context.Context, c containerd.Container, globalOptions 
 					log.G(ctx).WithError(err).Warnf("failed to remove anonymous volumes %v", anonVolumes)
 				}
 			}
+		}
+
+		// Tear down type=image mount state (host materializations and read-only
+		// views) backing this container - soft failure.
+		var imageMountKeys, imageMountHostpaths []string
+		if snapshotsJSON, ok := containerLabels[labels.ImageMountSnapshots]; ok {
+			if err = json.Unmarshal([]byte(snapshotsJSON), &imageMountKeys); err != nil {
+				log.G(ctx).WithError(err).Warnf("failed to unmarshal image-mount snapshots for container %q", id)
+			}
+		}
+		if hostpathsJSON, ok := containerLabels[labels.ImageMountHostpaths]; ok {
+			if err = json.Unmarshal([]byte(hostpathsJSON), &imageMountHostpaths); err != nil {
+				log.G(ctx).WithError(err).Warnf("failed to unmarshal image-mount host paths for container %q", id)
+			}
+		}
+		if len(imageMountKeys) > 0 || len(imageMountHostpaths) > 0 {
+			removeImageMounts(ctx, client.SnapshotService(imageMountSnapshotter), imageMountHostpaths, imageMountKeys)
 		}
 	}()
 

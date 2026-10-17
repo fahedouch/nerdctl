@@ -18,6 +18,9 @@ package mountutil
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -29,6 +32,20 @@ import (
 	"github.com/containerd/containerd/v2/pkg/oci"
 )
 
+// stubRROSupport replaces the detection of the recursive read-only (RRO)
+// support (which executes `$RUNTIME features` on the real implementation)
+// for unit testing.
+func stubRROSupport(t *testing.T, supported bool) {
+	orig := supportsRecursivelyReadOnly
+	supportsRecursivelyReadOnly = func(string) error {
+		if supported {
+			return nil
+		}
+		return errors.New("recursive read-only mounts are not supported (stubbed)")
+	}
+	t.Cleanup(func() { supportsRecursivelyReadOnly = orig })
+}
+
 // TestParseVolumeOptions tests volume options are parsed as expected.
 func TestParseVolumeOptions(t *testing.T) {
 	tests := []struct {
@@ -36,6 +53,7 @@ func TestParseVolumeOptions(t *testing.T) {
 		vType                    string
 		src                      string
 		optsRaw                  string
+		rroSupported             bool
 		srcOptional              []string
 		initialRootfsPropagation string
 		wants                    []string
@@ -64,6 +82,29 @@ func TestParseVolumeOptions(t *testing.T) {
 			src:     "dummy",
 			optsRaw: "ro",
 			wants:   []string{"ro"},
+		},
+		{
+			name:         "read only is recursive when the kernel and the runtime support RRO (Docker v25 behavior)",
+			vType:        "bind",
+			src:          "dummy",
+			optsRaw:      "ro",
+			rroSupported: true,
+			wants:        []string{"rro", "rprivate"},
+		},
+		{
+			name:         "deprecated rro option forces recursive read-only",
+			vType:        "bind",
+			src:          "dummy",
+			optsRaw:      "rro,rprivate",
+			rroSupported: true,
+			wants:        []string{"rro", "rprivate"},
+		},
+		{
+			name:     "deprecated rro option fails when RRO is not supported",
+			vType:    "bind",
+			src:      "dummy",
+			optsRaw:  "rro,rprivate",
+			wantFail: true,
 		},
 		{
 			name:     "duplicated flags are not allowed",
@@ -172,7 +213,8 @@ func TestParseVolumeOptions(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			opts, specOpts, err := parseVolumeOptionsWithMountInfo(tt.vType, tt.src, tt.optsRaw, func(string) (mount.Info, error) {
+			stubRROSupport(t, tt.rroSupported)
+			opts, specOpts, err := parseVolumeOptionsWithMountInfo(tt.vType, tt.src, tt.optsRaw, "", func(string) (mount.Info, error) {
 				return mount.Info{
 					Mountpoint: tt.src,
 					Optional:   strings.Join(tt.srcOptional, " "),
@@ -259,11 +301,16 @@ func TestProcessFlagV(t *testing.T) {
 			rawSpec: `/mnt/foo:./foo`,
 			err:     "expected an absolute path, got \"./foo\"",
 		},
+		{
+			rawSpec: `./:/`,
+			err:     "invalid specification: destination can't be '/'",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.rawSpec, func(t *testing.T) {
-			processedVolSpec, err := ProcessFlagV(tt.rawSpec, mockVolumeStore, false)
+			stubRROSupport(t, false)
+			processedVolSpec, err := ProcessFlagV(tt.rawSpec, mockVolumeStore, false, "")
 			if err != nil {
 				assert.Error(t, err, tt.err)
 				return
@@ -328,7 +375,8 @@ func TestProcessFlagVAnonymousVolumes(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.rawSpec, func(t *testing.T) {
-			processedVolSpec, err := ProcessFlagV(tt.rawSpec, mockVolumeStore, true)
+			stubRROSupport(t, false)
+			processedVolSpec, err := ProcessFlagV(tt.rawSpec, mockVolumeStore, true, "")
 			if err != nil {
 				assert.ErrorContains(t, err, tt.err)
 				return
@@ -345,6 +393,397 @@ func TestProcessFlagVAnonymousVolumes(t *testing.T) {
 
 			// for anonymous volumes, we want to make sure that the source is not the same as the destination
 			assert.Assert(t, processedVolSpec.Mount.Source != processedVolSpec.Mount.Destination)
+		})
+	}
+}
+
+// TestProcessFlagMountRW verifies that the non-Docker `rw` option is no longer
+// accepted by --mount, while ro/readonly/rro remain valid read-only flags.
+func TestProcessFlagMountRW(t *testing.T) {
+	// rw is no longer a valid --mount option.
+	rejected := []struct {
+		spec string
+		want string
+	}{
+		{"type=bind,source=/foo,target=/bar,rw", "must be a key=value pair"},
+		{"type=bind,source=/foo,target=/bar,rw=true", "unexpected key 'rw'"},
+		{"type=bind,source=/foo,target=/bar,rw=false", "unexpected key 'rw'"},
+	}
+	for _, tt := range rejected {
+		t.Run(tt.spec, func(t *testing.T) {
+			_, err := ProcessFlagMount(tt.spec, nil, "")
+			assert.ErrorContains(t, err, tt.want)
+		})
+	}
+
+	// ro/rro still parse into a complete read-only bind mount.
+	src := t.TempDir()
+	accepted := []struct {
+		spec         string
+		rroSupported bool
+		wants        *Processed
+	}{
+		{
+			spec: "type=bind,source=" + src + ",target=/bar,ro",
+			wants: &Processed{
+				Type: Bind,
+				Mount: specs.Mount{
+					Type:        "bind",
+					Source:      src,
+					Destination: "/bar",
+					Options:     []string{"rbind", "rprivate", "ro"},
+				},
+			},
+		},
+		{
+			// Read-only mounts are recursively read-only when possible (Docker v25 behavior).
+			spec:         "type=bind,source=" + src + ",target=/bar,ro",
+			rroSupported: true,
+			wants: &Processed{
+				Type: Bind,
+				Mount: specs.Mount{
+					Type:        "bind",
+					Source:      src,
+					Destination: "/bar",
+					Options:     []string{"rbind", "rprivate", "rro"},
+				},
+			},
+		},
+		{
+			// Deprecated alias of readonly,bind-propagation=rprivate,bind-recursive=readonly
+			spec:         "type=bind,source=" + src + ",target=/bar,rro",
+			rroSupported: true,
+			wants: &Processed{
+				Type: Bind,
+				Mount: specs.Mount{
+					Type:        "bind",
+					Source:      src,
+					Destination: "/bar",
+					Options:     []string{"rbind", "rprivate", "rro"},
+				},
+			},
+		},
+	}
+	for _, tt := range accepted {
+		t.Run(fmt.Sprintf("%s (rroSupported=%v)", tt.spec, tt.rroSupported), func(t *testing.T) {
+			stubRROSupport(t, tt.rroSupported)
+			got, err := ProcessFlagMount(tt.spec, nil, "")
+			assert.NilError(t, err)
+			assert.Equal(t, got.Type, tt.wants.Type)
+			assert.Equal(t, got.Mount.Type, tt.wants.Mount.Type)
+			assert.Equal(t, got.Mount.Source, tt.wants.Mount.Source)
+			assert.Equal(t, got.Mount.Destination, tt.wants.Mount.Destination)
+			assert.DeepEqual(t, got.Mount.Options, tt.wants.Mount.Options)
+		})
+	}
+
+	// The deprecated rro option fails when RRO is not supported.
+	stubRROSupport(t, false)
+	_, err := ProcessFlagMount("type=bind,source="+src+",target=/bar,rro", nil, "")
+	assert.ErrorContains(t, err, "not supported")
+}
+
+// TestProcessFlagMountBindRecursive verifies that the Docker `bind-recursive`
+// option (which supersedes the deprecated `bind-nonrecursive`) is honored and
+// maps to non-recursive (bind) or recursive (rbind) mounts, and controls the
+// recursive read-only (RRO) mode of read-only mounts.
+func TestProcessFlagMountBindRecursive(t *testing.T) {
+	src := t.TempDir()
+
+	accepted := []struct {
+		spec         string
+		rroSupported bool
+		wantOpts     []string
+	}{
+		{spec: "type=bind,source=" + src + ",target=/bar,bind-recursive=disabled", wantOpts: []string{"bind"}},
+		{spec: "type=bind,source=" + src + ",target=/bar,bind-recursive=enabled", wantOpts: []string{"rbind"}},
+		// The deprecated bind-nonrecursive option keeps working.
+		{spec: "type=bind,source=" + src + ",target=/bar,bind-nonrecursive", wantOpts: []string{"bind"}},
+		{spec: "type=bind,source=" + src + ",target=/bar,bind-nonrecursive=false", wantOpts: []string{"rbind"}},
+		// bind-recursive=writable keeps the read-only mount non-recursively read-only (Docker v24 behavior).
+		{
+			spec:         "type=bind,source=" + src + ",target=/bar,readonly,bind-recursive=writable",
+			rroSupported: true,
+			wantOpts:     []string{"rbind", "ro"},
+		},
+		// bind-recursive=readonly forces the recursive read-only mount.
+		{
+			spec:         "type=bind,source=" + src + ",target=/bar,readonly,bind-propagation=rprivate,bind-recursive=readonly",
+			rroSupported: true,
+			wantOpts:     []string{"rbind", "rro"},
+		},
+	}
+	for _, tt := range accepted {
+		t.Run(tt.spec, func(t *testing.T) {
+			stubRROSupport(t, tt.rroSupported)
+			got, err := ProcessFlagMount(tt.spec, nil, "")
+			assert.NilError(t, err)
+			for _, o := range tt.wantOpts {
+				assert.Assert(t, slices.Contains(got.Mount.Options, o),
+					"expected option %q in %v", o, got.Mount.Options)
+			}
+		})
+	}
+
+	rejected := []struct {
+		spec         string
+		rroSupported bool
+		want         string
+	}{
+		// Boolean aliases were removed for Docker compatibility (https://github.com/docker/cli/pull/4671).
+		{spec: "type=bind,source=" + src + ",target=/bar,bind-recursive=false", want: "invalid value for bind-recursive"},
+		{spec: "type=bind,source=" + src + ",target=/bar,bind-recursive=1", want: "invalid value for bind-recursive"},
+		{spec: "type=bind,source=" + src + ",target=/bar,bind-recursive=bogus", want: "invalid value for bind-recursive"},
+		{
+			spec: "type=bind,source=" + src + ",target=/bar,bind-recursive=writable",
+			want: "'bind-recursive=writable' requires 'readonly'",
+		},
+		{
+			spec: "type=bind,source=" + src + ",target=/bar,bind-recursive=readonly",
+			want: "'bind-recursive=readonly' requires 'readonly'",
+		},
+		{
+			spec: "type=bind,source=" + src + ",target=/bar,readonly,bind-recursive=readonly",
+			want: "'bind-recursive=readonly' requires 'bind-propagation=rprivate'",
+		},
+		{
+			spec: "type=bind,source=" + src + ",target=/bar,readonly,bind-propagation=rprivate,bind-nonrecursive,bind-recursive=readonly",
+			want: "conflicts with 'bind-nonrecursive'",
+		},
+		{
+			spec: "type=volume,source=foo,target=/bar,bind-recursive=enabled",
+			want: "only supported for bind mounts",
+		},
+		// bind-recursive=readonly fails when RRO is not supported.
+		{
+			spec: "type=bind,source=" + src + ",target=/bar,readonly,bind-propagation=rprivate,bind-recursive=readonly",
+			want: "not supported",
+		},
+	}
+	for _, tt := range rejected {
+		t.Run(tt.spec, func(t *testing.T) {
+			stubRROSupport(t, tt.rroSupported)
+			_, err := ProcessFlagMount(tt.spec, nil, "")
+			assert.ErrorContains(t, err, tt.want)
+		})
+	}
+}
+
+// TestProcessFlagMountImage tests parsing and validation of `--mount type=image`.
+func TestProcessFlagMountImage(t *testing.T) {
+	tests := []struct {
+		rawSpec string
+		wants   *Processed
+		err     string
+	}{
+		{
+			// Image mounts are always read-only, so Mode is "ro".
+			rawSpec: "type=image,source=alpine:latest,destination=/mnt/img",
+			wants: &Processed{
+				Type: Image,
+				Mode: "ro",
+				Mount: specs.Mount{
+					Type:        Image,
+					Source:      "alpine:latest",
+					Destination: "/mnt/img",
+				},
+			},
+		},
+		{
+			// target and src aliases must work too.
+			rawSpec: "type=image,src=alpine:latest,target=/mnt/img",
+			wants: &Processed{
+				Type: Image,
+				Mode: "ro",
+				Mount: specs.Mount{
+					Type:        Image,
+					Source:      "alpine:latest",
+					Destination: "/mnt/img",
+				},
+			},
+		},
+		{
+			rawSpec: "type=image,destination=/mnt/img",
+			err:     "requires a source",
+		},
+		{
+			rawSpec: "type=image,source=alpine:latest",
+			err:     "requires a destination",
+		},
+		{
+			// ro and rro are accepted for compatibility; image mounts are
+			// read-only regardless, so Mode stays "ro".
+			rawSpec: "type=image,source=alpine:latest,destination=/mnt/img,ro",
+			wants: &Processed{
+				Type:  Image,
+				Mode:  "ro",
+				Mount: specs.Mount{Type: Image, Source: "alpine:latest", Destination: "/mnt/img"},
+			},
+		},
+		{
+			rawSpec: "type=image,source=alpine:latest,destination=/mnt/img,rro",
+			wants: &Processed{
+				Type:  Image,
+				Mode:  "ro",
+				Mount: specs.Mount{Type: Image, Source: "alpine:latest", Destination: "/mnt/img"},
+			},
+		},
+		{
+			// rw is not a valid --mount token, so it is rejected at parse time,
+			// same as for a bind mount and same as Docker.
+			rawSpec: "type=image,source=alpine:latest,destination=/mnt/img,rw",
+			err:     "must be a key=value pair",
+		},
+		{
+			// readonly=false is accepted but ignored: like Docker, the image
+			// mount stays read-only (Mode "ro").
+			rawSpec: "type=image,source=alpine:latest,destination=/mnt/img,readonly=false",
+			wants: &Processed{
+				Type:  Image,
+				Mode:  "ro",
+				Mount: specs.Mount{Type: Image, Source: "alpine:latest", Destination: "/mnt/img"},
+			},
+		},
+		{
+			// bare subpath is not a type=image option; image-subpath is.
+			rawSpec: "type=image,source=alpine:latest,destination=/mnt/img,subpath=etc",
+			err:     "subpath",
+		},
+		{
+			// image-subpath selects a directory inside the image rootfs.
+			rawSpec: "type=image,source=alpine:latest,destination=/mnt/img,image-subpath=etc",
+			wants: &Processed{
+				Type:         Image,
+				Mode:         "ro",
+				Mount:        specs.Mount{Type: Image, Source: "alpine:latest", Destination: "/mnt/img"},
+				ImageSubpath: "etc",
+			},
+		},
+		{
+			// image-subpath is normalized: leading ./ and trailing / are stripped.
+			rawSpec: "type=image,source=alpine:latest,destination=/mnt/img,image-subpath=./etc/",
+			wants: &Processed{
+				Type:         Image,
+				Mode:         "ro",
+				Mount:        specs.Mount{Type: Image, Source: "alpine:latest", Destination: "/mnt/img"},
+				ImageSubpath: "etc",
+			},
+		},
+		{
+			// parent traversal must be rejected before the mount is built.
+			rawSpec: "type=image,source=alpine:latest,destination=/mnt/img,image-subpath=../etc",
+			err:     "escapes",
+		},
+		{
+			// traversal that normalizes back above root must be rejected.
+			rawSpec: "type=image,source=alpine:latest,destination=/mnt/img,image-subpath=a/b/../../../etc",
+			err:     "escapes",
+		},
+		{
+			// a path normalizing to "." is the whole rootfs; like Docker, this is
+			// the no-subpath case rather than an error.
+			rawSpec: "type=image,source=alpine:latest,destination=/mnt/img,image-subpath=.",
+			wants: &Processed{
+				Type:  Image,
+				Mode:  "ro",
+				Mount: specs.Mount{Type: Image, Source: "alpine:latest", Destination: "/mnt/img"},
+			},
+		},
+		{
+			// "a/.." also normalizes to the rootfs, so it is the whole-rootfs mount.
+			rawSpec: "type=image,source=alpine:latest,destination=/mnt/img,image-subpath=a/..",
+			wants: &Processed{
+				Type:  Image,
+				Mode:  "ro",
+				Mount: specs.Mount{Type: Image, Source: "alpine:latest", Destination: "/mnt/img"},
+			},
+		},
+		{
+			// nested subpath is normalized and preserved.
+			rawSpec: "type=image,source=alpine:latest,destination=/mnt/img,image-subpath=usr/lib",
+			wants: &Processed{
+				Type:         Image,
+				Mode:         "ro",
+				Mount:        specs.Mount{Type: Image, Source: "alpine:latest", Destination: "/mnt/img"},
+				ImageSubpath: "usr/lib",
+			},
+		},
+		{
+			// absolute image-subpath is rejected; it must be relative to the rootfs.
+			rawSpec: "type=image,source=alpine:latest,destination=/mnt/img,image-subpath=/etc",
+			err:     "relative",
+		},
+		{
+			// image-subpath only applies to type=image.
+			rawSpec: "type=bind,source=/tmp,destination=/mnt,image-subpath=etc",
+			err:     "only supported for type=image",
+		},
+		{
+			// an explicitly empty image-subpath is an error, not "unset": Docker
+			// rejects it on every mount type.
+			rawSpec: "type=image,source=alpine:latest,destination=/mnt/img,image-subpath=",
+			err:     "value is empty",
+		},
+		{
+			rawSpec: "type=bind,source=/tmp,destination=/mnt,image-subpath=",
+			err:     "value is empty",
+		},
+		{
+			// a subpath whose ".." segments cancel out is normalized, like Docker.
+			rawSpec: "type=image,source=alpine:latest,destination=/mnt/img,image-subpath=a/../etc",
+			wants: &Processed{
+				Type:         Image,
+				Mode:         "ro",
+				Mount:        specs.Mount{Type: Image, Source: "alpine:latest", Destination: "/mnt/img"},
+				ImageSubpath: "etc",
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.rawSpec, func(t *testing.T) {
+			got, err := ProcessFlagMount(tt.rawSpec, nil, "")
+			if tt.err != "" {
+				assert.ErrorContains(t, err, tt.err)
+				return
+			}
+			assert.NilError(t, err)
+			assert.Equal(t, got.Type, tt.wants.Type)
+			assert.Equal(t, got.Mode, tt.wants.Mode)
+			assert.Equal(t, got.Mount.Type, tt.wants.Mount.Type)
+			assert.Equal(t, got.Mount.Source, tt.wants.Mount.Source)
+			assert.Equal(t, got.Mount.Destination, tt.wants.Mount.Destination)
+			assert.Equal(t, got.ImageSubpath, tt.wants.ImageSubpath)
+		})
+	}
+}
+
+func TestProcessFlagMountVolumeNoCopy(t *testing.T) {
+	tests := []struct {
+		rawSpec string
+		wants   bool
+	}{
+		{
+			rawSpec: "type=volume,source=TestVolume,target=/mnt,volume-nocopy",
+			wants:   true,
+		},
+		{
+			rawSpec: "type=volume,source=TestVolume,target=/mnt,volume-nocopy=true",
+			wants:   true,
+		},
+		{
+			rawSpec: "type=volume,source=TestVolume,target=/mnt,volume-nocopy=false",
+			wants:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.rawSpec, func(t *testing.T) {
+			got, err := ProcessFlagMount(tt.rawSpec, mockVolumeStore, "")
+			assert.NilError(t, err)
+
+			assert.Equal(t, got.Type, Volume)
+			assert.Equal(t, got.Name, "TestVolume")
+			assert.Equal(t, got.VolumeNoCopy, tt.wants)
 		})
 	}
 }

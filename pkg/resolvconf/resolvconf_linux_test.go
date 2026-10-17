@@ -21,6 +21,8 @@ import (
 	"bytes"
 	"os"
 	"testing"
+
+	"github.com/containerd/nerdctl/v2/pkg/internal/filesystem"
 )
 
 func TestGet(t *testing.T) {
@@ -28,7 +30,7 @@ func TestGet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resolvConfSystem, err := os.ReadFile("/run/systemd/resolve/resolv.conf")
+	resolvConfSystem, err := filesystem.ReadFile("/run/systemd/resolve/resolv.conf")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +173,7 @@ func TestBuild(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	content, err := os.ReadFile(file.Name())
+	content, err := filesystem.ReadFile(file.Name())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +195,7 @@ func TestBuildWithZeroLengthDomainSearch(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	content, err := os.ReadFile(file.Name())
+	content, err := filesystem.ReadFile(file.Name())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +220,7 @@ func TestBuildWithNoOptions(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	content, err := os.ReadFile(file.Name())
+	content, err := filesystem.ReadFile(file.Name())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -316,5 +318,102 @@ func TestFilterResolvDns(t *testing.T) {
 		if ns0 != string(result.Content) {
 			t.Fatalf("Failed no Localhost+IPv6 enabled: expected \n<%s> got \n<%s>", ns0, string(result.Content))
 		}
+	}
+}
+
+func TestFilterResolvDnsWithLocalhostOption(t *testing.T) {
+	testCases := []struct {
+		name              string
+		input             string
+		allowLocalhostDNS bool
+		ipv6Enabled       bool
+		expected          string
+	}{
+		{
+			name:              "filter_disallow_localhost_ipv6_disabled",
+			input:             "nameserver 127.0.0.53\nnameserver 192.88.99.1\nnameserver ::1\nnameserver 2001:db8::1\n",
+			allowLocalhostDNS: false,
+			ipv6Enabled:       false,
+			expected:          "nameserver 192.88.99.1\n",
+		},
+		{
+			name:              "filter_allow_localhost_ipv6_disabled",
+			input:             "nameserver 127.0.0.53\nnameserver 192.88.99.1\nnameserver ::1\nnameserver 2001:db8::1\n",
+			allowLocalhostDNS: true,
+			ipv6Enabled:       false,
+			expected:          "nameserver 127.0.0.53\nnameserver 192.88.99.1\n",
+		},
+		{
+			name:              "filter_disallow_localhost_ipv6_enabled",
+			input:             "nameserver 127.0.0.53\nnameserver 192.88.99.1\nnameserver ::1\nnameserver 2001:db8::1\n",
+			allowLocalhostDNS: false,
+			ipv6Enabled:       true,
+			expected:          "nameserver 192.88.99.1\nnameserver 2001:db8::1\n",
+		},
+		{
+			name:              "filter_allow_localhost_ipv6_enabled",
+			input:             "nameserver 127.0.0.53\nnameserver 192.88.99.1\nnameserver ::1\nnameserver 2001:db8::1\n",
+			allowLocalhostDNS: true,
+			ipv6Enabled:       true,
+			expected:          "nameserver 127.0.0.53\nnameserver 192.88.99.1\nnameserver ::1\nnameserver 2001:db8::1\n",
+		},
+		{
+			name:              "fallback_none_ipv6_disabled",
+			input:             "",
+			allowLocalhostDNS: false,
+			ipv6Enabled:       false,
+			expected:          "\nnameserver 8.8.8.8\nnameserver 8.8.4.4",
+		},
+		{
+			name:              "fallback_none_ipv6_enabled",
+			input:             "",
+			allowLocalhostDNS: false,
+			ipv6Enabled:       true,
+			expected:          "\nnameserver 8.8.8.8\nnameserver 8.8.4.4\nnameserver 2001:4860:4860::8888\nnameserver 2001:4860:4860::8844",
+		},
+		{
+			name:              "fallback_localhost4_ipv6_disabled",
+			input:             "nameserver 127.0.0.53",
+			allowLocalhostDNS: false,
+			ipv6Enabled:       false,
+			expected:          "\nnameserver 8.8.8.8\nnameserver 8.8.4.4",
+		},
+		{
+			name:              "fallback_localhost4_ipv6_enabled",
+			input:             "nameserver 127.0.0.53",
+			allowLocalhostDNS: false,
+			ipv6Enabled:       true,
+			expected:          "\nnameserver 8.8.8.8\nnameserver 8.8.4.4\nnameserver 2001:4860:4860::8888\nnameserver 2001:4860:4860::8844",
+		},
+		{
+			name:              "fallback_localhost6_ipv6_disabled",
+			input:             "nameserver ::1",
+			allowLocalhostDNS: false,
+			ipv6Enabled:       false,
+			expected:          "\nnameserver 8.8.8.8\nnameserver 8.8.4.4",
+		},
+		{
+			name:              "fallback_localhost6_ipv6_enabled",
+			input:             "nameserver ::1",
+			allowLocalhostDNS: false,
+			ipv6Enabled:       true,
+			expected:          "\nnameserver 8.8.8.8\nnameserver 8.8.4.4\nnameserver 2001:4860:4860::8888\nnameserver 2001:4860:4860::8844",
+		},
+	}
+
+	for _, tc := range testCases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := FilterResolvDNSWithLocalhostOption([]byte(tc.input), tc.ipv6Enabled, tc.allowLocalhostDNS)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if result == nil {
+				t.Fatal("result is nil")
+			}
+			if tc.expected != string(result.Content) {
+				t.Fatalf("expected \n<%s> got \n<%s>", tc.expected, string(result.Content))
+			}
+		})
 	}
 }

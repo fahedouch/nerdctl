@@ -61,6 +61,7 @@ func convertCommand() *cobra.Command {
 	cmd.Flags().Int("estargz-min-chunk-size", 0, "The minimal number of bytes of data must be written in one gzip stream. (requires stargz-snapshotter >= v0.13.0)")
 	cmd.Flags().Bool("estargz-external-toc", false, "Separate TOC JSON into another image (called \"TOC image\"). The name of TOC image is the original + \"-esgztoc\" suffix. Both eStargz and the TOC image should be pushed to the same registry. (requires stargz-snapshotter >= v0.13.0) (EXPERIMENTAL)")
 	cmd.Flags().Bool("estargz-keep-diff-id", false, "Convert to esgz without changing diffID (cannot be used in conjunction with '--estargz-record-in'. must be specified with '--estargz-external-toc')")
+	cmd.Flags().String("estargz-gzip-helper", "", "Helper command for decompressing layers compressed with gzip. Options: pigz, igzip, or gzip.")
 	// #endregion
 
 	// #region zstd flags
@@ -87,6 +88,19 @@ func convertCommand() *cobra.Command {
 	cmd.Flags().Bool("overlaybd", false, "Convert tar.gz layers to overlaybd layers")
 	cmd.Flags().String("overlaybd-fs-type", "ext4", "Filesystem type for overlaybd")
 	cmd.Flags().String("overlaybd-dbstr", "", "Database config string for overlaybd")
+	cmd.Flags().Int("overlaybd-vsize", 64, "Virtual block device size in GB for overlaybd")
+	// #endregion
+
+	// #region soci flags
+	cmd.Flags().Bool("soci", false, "Convert image to SOCI Index V2 format.")
+	cmd.Flags().Int64("soci-min-layer-size", -1, "The minimum size of layers that will be converted to SOCI Index V2 format")
+	cmd.Flags().Int64("soci-span-size", -1, "The size of SOCI spans")
+	// #endregion
+
+	// #region erofs flags
+	cmd.Flags().String("erofs", "", "Convert image layers to EROFS media type. Supported values: raw, zstd")
+	cmd.Flags().String("erofs-compressors", "", "Specify mkfs.erofs compressor options (e.g. 'lz4hc,12')")
+	cmd.Flags().String("erofs-mkfs-options", "", "Specify extra mkfs.erofs options (e.g. '-T0 --mkfs-time')")
 	// #endregion
 
 	// #region generic flags
@@ -106,9 +120,13 @@ func convertCommand() *cobra.Command {
 
 func convertOptions(cmd *cobra.Command) (types.ImageConvertOptions, error) {
 	globalOptions, err := helpers.ProcessRootCmdFlags(cmd)
+
 	if err != nil {
 		return types.ImageConvertOptions{}, err
 	}
+
+	progressOutput := cmd.ErrOrStderr()
+
 	format, err := cmd.Flags().GetString("format")
 	if err != nil {
 		return types.ImageConvertOptions{}, err
@@ -140,6 +158,10 @@ func convertOptions(cmd *cobra.Command) (types.ImageConvertOptions, error) {
 		return types.ImageConvertOptions{}, err
 	}
 	estargzKeepDiffID, err := cmd.Flags().GetBool("estargz-keep-diff-id")
+	if err != nil {
+		return types.ImageConvertOptions{}, err
+	}
+	estargzGzipHelper, err := cmd.Flags().GetString("estargz-gzip-helper")
 	if err != nil {
 		return types.ImageConvertOptions{}, err
 	}
@@ -211,6 +233,40 @@ func convertOptions(cmd *cobra.Command) (types.ImageConvertOptions, error) {
 	if err != nil {
 		return types.ImageConvertOptions{}, err
 	}
+	overlaybdVsize, err := cmd.Flags().GetInt("overlaybd-vsize")
+	if err != nil {
+		return types.ImageConvertOptions{}, err
+	}
+	// #endregion
+
+	// #region soci flags
+	soci, err := cmd.Flags().GetBool("soci")
+	if err != nil {
+		return types.ImageConvertOptions{}, err
+	}
+	sociMinLayerSize, err := cmd.Flags().GetInt64("soci-min-layer-size")
+	if err != nil {
+		return types.ImageConvertOptions{}, err
+	}
+	sociSpanSize, err := cmd.Flags().GetInt64("soci-span-size")
+	if err != nil {
+		return types.ImageConvertOptions{}, err
+	}
+	// #endregion
+
+	// #region erofs flags
+	erofs, err := cmd.Flags().GetString("erofs")
+	if err != nil {
+		return types.ImageConvertOptions{}, err
+	}
+	erofsCompressors, err := cmd.Flags().GetString("erofs-compressors")
+	if err != nil {
+		return types.ImageConvertOptions{}, err
+	}
+	erofsMkfsOptions, err := cmd.Flags().GetString("erofs-mkfs-options")
+	if err != nil {
+		return types.ImageConvertOptions{}, err
+	}
 	// #endregion
 
 	// #region generic flags
@@ -237,37 +293,6 @@ func convertOptions(cmd *cobra.Command) (types.ImageConvertOptions, error) {
 	return types.ImageConvertOptions{
 		GOptions: globalOptions,
 		Format:   format,
-		// #region estargz flags
-		Estargz:                 estargz,
-		EstargzRecordIn:         estargzRecordIn,
-		EstargzCompressionLevel: estargzCompressionLevel,
-		EstargzChunkSize:        estargzChunkSize,
-		EstargzMinChunkSize:     estargzMinChunkSize,
-		EstargzExternalToc:      estargzExternalTOC,
-		EstargzKeepDiffID:       estargzKeepDiffID,
-		// #endregion
-		// #region zstd flags
-		Zstd:                 zstd,
-		ZstdCompressionLevel: zstdCompressionLevel,
-		// #endregion
-		// #region zstd:chunked flags
-		ZstdChunked:                 zstdchunked,
-		ZstdChunkedCompressionLevel: zstdChunkedCompressionLevel,
-		ZstdChunkedChunkSize:        zstdChunkedChunkSize,
-		ZstdChunkedRecordIn:         zstdChunkedRecordIn,
-		// #endregion
-		// #region nydus flags
-		Nydus:                 nydus,
-		NydusBuilderPath:      nydusBuilderPath,
-		NydusWorkDir:          nydusWorkDir,
-		NydusPrefetchPatterns: nydusPrefetchPatterns,
-		NydusCompressor:       nydusCompressor,
-		// #endregion
-		// #region overlaybd flags
-		Overlaybd:      overlaybd,
-		OverlayFsType:  overlaybdFsType,
-		OverlaydbDBStr: overlaybdDbstr,
-		// #endregion
 		// #region generic flags
 		Uncompress: uncompress,
 		Oci:        oci,
@@ -276,7 +301,56 @@ func convertOptions(cmd *cobra.Command) (types.ImageConvertOptions, error) {
 		Platforms:    platforms,
 		AllPlatforms: allPlatforms,
 		// #endregion
-		Stdout: cmd.OutOrStdout(),
+		// Embed image format options
+		EstargzOptions: types.EstargzOptions{
+			Estargz:                 estargz,
+			EstargzRecordIn:         estargzRecordIn,
+			EstargzCompressionLevel: estargzCompressionLevel,
+			EstargzChunkSize:        estargzChunkSize,
+			EstargzMinChunkSize:     estargzMinChunkSize,
+			EstargzExternalToc:      estargzExternalTOC,
+			EstargzKeepDiffID:       estargzKeepDiffID,
+			EstargzGzipHelper:       estargzGzipHelper,
+		},
+		ZstdOptions: types.ZstdOptions{
+			Zstd:                 zstd,
+			ZstdCompressionLevel: zstdCompressionLevel,
+		},
+		ZstdChunkedOptions: types.ZstdChunkedOptions{
+			ZstdChunked:                 zstdchunked,
+			ZstdChunkedCompressionLevel: zstdChunkedCompressionLevel,
+			ZstdChunkedChunkSize:        zstdChunkedChunkSize,
+			ZstdChunkedRecordIn:         zstdChunkedRecordIn,
+		},
+		NydusOptions: types.NydusOptions{
+			Nydus:                 nydus,
+			NydusBuilderPath:      nydusBuilderPath,
+			NydusWorkDir:          nydusWorkDir,
+			NydusPrefetchPatterns: nydusPrefetchPatterns,
+			NydusCompressor:       nydusCompressor,
+		},
+		OverlaybdOptions: types.OverlaybdOptions{
+			Overlaybd:      overlaybd,
+			OverlayFsType:  overlaybdFsType,
+			OverlaydbDBStr: overlaybdDbstr,
+			OverlaybdVsize: overlaybdVsize,
+		},
+		SociConvertOptions: types.SociConvertOptions{
+			Soci: soci,
+			SociOptions: types.SociOptions{
+				SpanSize:     sociSpanSize,
+				MinLayerSize: sociMinLayerSize,
+				Platforms:    platforms,
+				AllPlatforms: allPlatforms,
+			},
+		},
+		ErofsOptions: types.ErofsOptions{
+			Erofs:            erofs,
+			ErofsCompressors: erofsCompressors,
+			ErofsMkfsOptions: erofsMkfsOptions,
+		},
+		ProgressOutput: progressOutput,
+		Stdout:         cmd.OutOrStdout(),
 	}, nil
 }
 

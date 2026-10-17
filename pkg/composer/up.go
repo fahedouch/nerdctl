@@ -57,18 +57,6 @@ func (opts UpOptions) recreateStrategy() string {
 }
 
 func (c *Composer) Up(ctx context.Context, uo UpOptions, services []string) error {
-	for shortName := range c.project.Networks {
-		if err := c.upNetwork(ctx, shortName); err != nil {
-			return err
-		}
-	}
-
-	for shortName := range c.project.Volumes {
-		if err := c.upVolume(ctx, shortName); err != nil {
-			return err
-		}
-	}
-
 	for shortName, secret := range c.project.Secrets {
 		obj := types.FileObjectConfig(secret)
 		if err := validateFileObjectConfig(obj, shortName, "service", c.project); err != nil {
@@ -85,7 +73,7 @@ func (c *Composer) Up(ctx context.Context, uo UpOptions, services []string) erro
 
 	var parsedServices []*serviceparser.Service
 	// use WithServices to sort the services in dependency order
-	if err := c.project.ForEachService(services, func(name string, svc *types.ServiceConfig) error {
+	forEachFn := func(name string, svc *types.ServiceConfig) error {
 		if replicas, ok := uo.Scale[svc.Name]; ok {
 			if svc.Deploy == nil {
 				svc.Deploy = &types.DeployConfig{}
@@ -98,8 +86,22 @@ func (c *Composer) Up(ctx context.Context, uo UpOptions, services []string) erro
 		}
 		parsedServices = append(parsedServices, ps)
 		return nil
-	}); err != nil {
+	}
+	err := c.project.ForEachService(services, forEachFn)
+	if err != nil {
 		return err
+	}
+
+	for shortName := range c.project.Networks {
+		if err := c.upNetwork(ctx, shortName); err != nil {
+			return err
+		}
+	}
+
+	for shortName := range c.project.Volumes {
+		if err := c.upVolume(ctx, shortName); err != nil {
+			return err
+		}
 	}
 
 	// remove orphan containers before the service has be started
@@ -114,7 +116,7 @@ func (c *Composer) Up(ctx context.Context, uo UpOptions, services []string) erro
 				return fmt.Errorf("error removing orphaned containers: %w", err)
 			}
 		} else {
-			log.G(ctx).Warnf("found %d orphaned containers: %v, you can run this command with the --remove-orphans flag to clean it up", len(orphans), orphans)
+			log.G(ctx).Warnf("found %d orphaned containers: %v, you can run this command with the --remove-orphans flag to clean it up", len(orphans), containerShortIDs(orphans))
 		}
 	}
 

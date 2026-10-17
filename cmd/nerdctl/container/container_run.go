@@ -26,6 +26,8 @@ import (
 	"golang.org/x/term"
 
 	"github.com/containerd/console"
+	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/core/runtime/restart"
 	"github.com/containerd/log"
 
 	"github.com/containerd/nerdctl/v2/cmd/nerdctl/completion"
@@ -33,10 +35,12 @@ import (
 	"github.com/containerd/nerdctl/v2/pkg/api/types"
 	"github.com/containerd/nerdctl/v2/pkg/clientutil"
 	"github.com/containerd/nerdctl/v2/pkg/cmd/container"
+	"github.com/containerd/nerdctl/v2/pkg/config"
 	"github.com/containerd/nerdctl/v2/pkg/consoleutil"
 	"github.com/containerd/nerdctl/v2/pkg/containerutil"
 	"github.com/containerd/nerdctl/v2/pkg/defaults"
 	"github.com/containerd/nerdctl/v2/pkg/errutil"
+	"github.com/containerd/nerdctl/v2/pkg/healthcheck"
 	"github.com/containerd/nerdctl/v2/pkg/labels"
 	"github.com/containerd/nerdctl/v2/pkg/logging"
 	"github.com/containerd/nerdctl/v2/pkg/netutil"
@@ -85,7 +89,7 @@ func setCreateFlags(cmd *cobra.Command) {
 	cmd.Flags().Bool("help", false, "show help")
 
 	cmd.Flags().BoolP("tty", "t", false, "Allocate a pseudo-TTY")
-	cmd.Flags().Bool("sig-proxy", true, "Proxy received signals to the process (default true)")
+	cmd.Flags().Bool("sig-proxy", true, "Proxy received signals to the process")
 	cmd.Flags().BoolP("interactive", "i", false, "Keep STDIN open even if not attached")
 	cmd.Flags().String("restart", "no", `Restart policy to apply when a container exits (implemented values: "no"|"always|on-failure:n|unless-stopped")`)
 	cmd.RegisterFlagCompletionFunc("restart", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
@@ -129,6 +133,8 @@ func setCreateFlags(cmd *cobra.Command) {
 	cmd.Flags().StringSlice("dns-option", nil, "Set DNS options")
 	// publish is defined as StringSlice, not StringArray, to allow specifying "--publish=80:80,443:443" (compatible with Podman)
 	cmd.Flags().StringSliceP("publish", "p", nil, "Publish a container's port(s) to the host")
+	cmd.Flags().StringSlice("expose", nil, "Expose a port or a range of ports")
+	cmd.Flags().BoolP("publish-all", "P", false, "Publish all exposed ports to random ports")
 	cmd.Flags().String("ip", "", "IPv4 address to assign to the container")
 	cmd.Flags().String("ip6", "", "IPv6 address to assign to the container")
 	cmd.Flags().StringP("hostname", "h", "", "Container host name")
@@ -136,16 +142,26 @@ func setCreateFlags(cmd *cobra.Command) {
 	cmd.Flags().String("mac-address", "", "MAC address to assign to the container")
 	// #endregion
 
-	cmd.Flags().String("ipc", "", `IPC namespace to use ("host"|"private")`)
+	cmd.Flags().String("ipc", "", `IPC namespace to use ("host"|"private"|"shareable"|"container:<container>")`)
 	cmd.RegisterFlagCompletionFunc("ipc", func(cmd *cobra.Command, args []string, toComplete string) ([]string, cobra.ShellCompDirective) {
-		return []string{"host", "private"}, cobra.ShellCompDirectiveNoFileComp
+		if strings.HasPrefix(toComplete, "container:") {
+			names, directive := completion.ContainerNames(cmd, func(st containerd.ProcessStatus) bool {
+				return st == containerd.Running
+			})
+			var candidates []string
+			for _, name := range names {
+				candidates = append(candidates, "container:"+name)
+			}
+			return candidates, directive
+		}
+		return []string{"host", "private", "shareable", "container:"}, cobra.ShellCompDirectiveNoSpace
 	})
 	// #region cgroups, namespaces, and ulimits flags
 	cmd.Flags().Float64("cpus", 0.0, "Number of CPUs")
 	cmd.Flags().StringP("memory", "m", "", "Memory limit")
 	cmd.Flags().String("memory-reservation", "", "Memory soft limit")
 	cmd.Flags().String("memory-swap", "", "Swap limit equal to memory plus swap: '-1' to enable unlimited swap")
-	cmd.Flags().Int64("memory-swappiness", -1, "Tune container memory swappiness (0 to 100) (default -1)")
+	cmd.Flags().Int64("memory-swappiness", -1, "Tune container memory swappiness (0 to 100)")
 	cmd.Flags().String("kernel-memory", "", "Kernel memory limit (deprecated)")
 	cmd.Flags().Bool("oom-kill-disable", false, "Disable OOM Killer")
 	cmd.Flags().Int("oom-score-adj", 0, "Tune container’s OOM preferences (-1000 to 1000, rootless: 100 to 1000)")
@@ -205,7 +221,7 @@ func setCreateFlags(cmd *cobra.Command) {
 	cmd.Flags().StringSlice("cap-drop", []string{}, "Drop Linux capabilities")
 	cmd.RegisterFlagCompletionFunc("cap-drop", capShellComplete)
 	cmd.Flags().Bool("privileged", false, "Give extended privileges to this container")
-	cmd.Flags().String("systemd", "false", "Allow running systemd in this container (default: false)")
+	cmd.Flags().String("systemd", "false", "Allow running systemd in this container")
 	// #endregion
 
 	// #region runtime flags
@@ -233,6 +249,14 @@ func setCreateFlags(cmd *cobra.Command) {
 	cmd.Flags().Bool("read-only", false, "Mount the container's root filesystem as read only")
 	// rootfs flags (from Podman)
 	cmd.Flags().Bool("rootfs", false, "The first argument is not an image but the rootfs to the exploded container")
+
+	// Health check flags
+	cmd.Flags().String("health-cmd", "", "Command to run to check health")
+	cmd.Flags().Duration("health-interval", 0, "Time between running the check; 0 uses the image value or 30s when unset there too")
+	cmd.Flags().Duration("health-timeout", 0, "Maximum time to allow one check to run; 0 uses the image value or 30s when unset there too")
+	cmd.Flags().Int("health-retries", 0, "Consecutive failures needed to report unhealthy; 0 uses the image value or 3 when unset there too")
+	cmd.Flags().Duration("health-start-period", 0, "Start period for the container to initialize before starting health-retries countdown")
+	cmd.Flags().Bool("no-healthcheck", false, "Disable any container-specified HEALTHCHECK")
 
 	// #region env flags
 	// entrypoint needs to be StringArray, not StringSlice, to prevent "FOO=foo1,foo2" from being split to {"FOO=foo1", "foo2"}
@@ -367,7 +391,7 @@ func runAction(cmd *cobra.Command, args []string) error {
 		return errors.New("flags -d and -a cannot be specified together")
 	}
 
-	netFlags, err := loadNetworkFlags(cmd)
+	netFlags, err := loadNetworkFlags(cmd, createOpt.GOptions)
 	if err != nil {
 		return fmt.Errorf("failed to load networking flags: %w", err)
 	}
@@ -421,13 +445,52 @@ func runAction(cmd *cobra.Command, args []string) error {
 	}
 	logURI := lab[labels.LogURI]
 	detachC := make(chan struct{})
-	task, err := taskutil.NewTask(ctx, client, c, createOpt.Attach, createOpt.Interactive, createOpt.TTY, createOpt.Detach,
-		con, logURI, createOpt.DetachKeys, createOpt.GOptions.Namespace, detachC)
+	task, err := taskutil.NewTask(ctx, client, c, taskutil.TaskOptions{
+		AttachStreamOpt: createOpt.Attach,
+		IsInteractive:   createOpt.Interactive,
+		IsTerminal:      createOpt.TTY,
+		IsDetach:        createOpt.Detach,
+		Con:             con,
+		LogURI:          logURI,
+		DetachKeys:      createOpt.DetachKeys,
+		Namespace:       createOpt.GOptions.Namespace,
+		DetachC:         detachC,
+		CheckpointDir:   "",
+	})
 	if err != nil {
 		return err
 	}
+	var statusC <-chan containerd.ExitStatus
+	if !createOpt.Detach {
+		statusC, err = task.Wait(ctx)
+		if err != nil {
+			return err
+		}
+	}
 	if err := task.Start(ctx); err != nil {
 		return err
+	}
+
+	// Set status label running should call after task is started.
+	_, restartPolicyExist := lab[restart.PolicyLabel]
+	if restartPolicyExist {
+		if err := containerutil.UpdateStatusLabel(ctx, c, containerd.Running); err != nil {
+			return err
+		}
+	}
+
+	if err := containerutil.UpdateExplicitlyStoppedLabel(ctx, c, false); err != nil {
+		return err
+	}
+
+	if hcStr, ok := lab[labels.HealthCheck]; ok && hcStr != "" {
+		// Setup container healthchecks.
+		if err := healthcheck.CreateTimer(ctx, c, (*config.Config)(&createOpt.GOptions), createOpt.NerdctlCmd, createOpt.NerdctlArgs, lab); err != nil {
+			return fmt.Errorf("failed to create healthcheck timer: %w", err)
+		}
+		if err := healthcheck.StartTimer(ctx, c, (*config.Config)(&createOpt.GOptions), lab); err != nil {
+			return fmt.Errorf("failed to start healthcheck timer: %w", err)
+		}
 	}
 
 	if createOpt.Detach {
@@ -445,10 +508,6 @@ func runAction(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	statusC, err := task.Wait(ctx)
-	if err != nil {
-		return err
-	}
 	select {
 	// io.Wait() would return when either 1) the user detaches from the container OR 2) the container is about to exit.
 	//

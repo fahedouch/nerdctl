@@ -17,12 +17,13 @@
 package infoutil
 
 import (
+	"context"
 	"fmt"
 	"runtime"
 	"strings"
 
-	"github.com/docker/docker/pkg/meminfo"
-	"github.com/docker/docker/pkg/sysinfo"
+	"github.com/moby/moby/v2/pkg/meminfo"
+	"github.com/moby/moby/v2/pkg/sysinfo"
 
 	"github.com/containerd/cgroups/v3"
 
@@ -42,7 +43,7 @@ func CgroupsVersion() string {
 	return "1"
 }
 
-func fulfillSecurityOptions(info *dockercompat.Info) {
+func fulfillSecurityOptions(info *dockercompat.Info, selinuxEnabled bool) {
 	if apparmorutil.CanApplyExistingProfile() {
 		info.SecurityOptions = append(info.SecurityOptions, "name=apparmor")
 		if rootlessutil.IsRootless() && !apparmorutil.CanApplySpecificExistingProfile(defaults.AppArmorProfileName) {
@@ -51,6 +52,9 @@ WARNING: AppArmor profile %q is not loaded.
          Use 'sudo nerdctl apparmor load' if you prefer to use AppArmor with rootless mode.
          This warning is negligible if you do not intend to use AppArmor.`), defaults.AppArmorProfileName))
 		}
+	}
+	if selinuxEnabled {
+		info.SecurityOptions = append(info.SecurityOptions, "name=selinux")
 	}
 	info.SecurityOptions = append(info.SecurityOptions, "name=seccomp,profile="+defaults.SeccompProfileName)
 	if defaults.CgroupnsMode() == "private" {
@@ -65,8 +69,8 @@ WARNING: AppArmor profile %q is not loaded.
 //
 // fulfillPlatformInfo requires the following fields to be set:
 // SecurityOptions, CgroupDriver, CgroupVersion
-func fulfillPlatformInfo(info *dockercompat.Info) {
-	fulfillSecurityOptions(info)
+func fulfillPlatformInfo(info *dockercompat.Info, selinuxEnabled bool) {
+	fulfillSecurityOptions(info, selinuxEnabled)
 	mobySysInfo := mobySysInfo(info)
 
 	if info.CgroupDriver == "none" {
@@ -138,9 +142,12 @@ func fulfillPlatformInfo(info *dockercompat.Info) {
 func mobySysInfo(info *dockercompat.Info) *sysinfo.SysInfo {
 	var mobySysInfoOpts []sysinfo.Opt
 	if info.CgroupDriver == "systemd" && info.CgroupVersion == "2" && rootlessutil.IsRootless() {
-		g := fmt.Sprintf("/user.slice/user-%d.slice", rootlessutil.ParentEUID())
-		mobySysInfoOpts = append(mobySysInfoOpts, sysinfo.WithCgroup2GroupPath(g))
+		groupPath, err := systemdUserManagerControlGroup(context.TODO())
+		if err != nil {
+			info.Warnings = append(info.Warnings, fmt.Sprintf("WARNING: Failed to detect rootless systemd cgroup: %v", err))
+			groupPath = fmt.Sprintf("/user.slice/user-%d.slice", rootlessutil.ParentEUID())
+		}
+		mobySysInfoOpts = append(mobySysInfoOpts, sysinfo.WithCgroup2GroupPath(groupPath))
 	}
-	mobySysInfo := sysinfo.New(mobySysInfoOpts...)
-	return mobySysInfo
+	return sysinfo.New(mobySysInfoOpts...)
 }

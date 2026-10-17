@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -28,6 +29,7 @@ import (
 	"github.com/containerd/nerdctl/mod/tigron/expect"
 	"github.com/containerd/nerdctl/mod/tigron/require"
 	"github.com/containerd/nerdctl/mod/tigron/test"
+	"github.com/containerd/nerdctl/mod/tigron/tig"
 
 	testhelpers "github.com/containerd/nerdctl/v2/cmd/nerdctl/helpers"
 	"github.com/containerd/nerdctl/v2/pkg/testutil"
@@ -48,7 +50,7 @@ func TestSaveContent(t *testing.T) {
 		},
 		Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
 			return &test.Expected{
-				Output: func(stdout string, info string, t *testing.T) {
+				Output: func(stdout string, t tig.T) {
 					rootfsPath := filepath.Join(data.Temp().Path(), "rootfs")
 					err := testhelpers.ExtractDockerArchive(filepath.Join(data.Temp().Path(), "out.tar"), rootfsPath)
 					assert.NilError(t, err)
@@ -57,6 +59,84 @@ func TestSaveContent(t *testing.T) {
 					assert.NilError(t, err)
 					etcOSRelease := string(etcOSReleaseBytes)
 					assert.Assert(t, strings.Contains(etcOSRelease, "Alpine"))
+				},
+			}
+		},
+	}
+
+	testCase.Run(t)
+}
+
+func TestSaveReplacesExistingFile(t *testing.T) {
+	nerdtest.Setup()
+
+	const reused = "reused.tar"
+
+	testCase := &test.Case{
+		// FIXME: move to busybox for windows?
+		Require: require.Not(require.Windows),
+		Setup: func(data test.Data, helpers test.Helpers) {
+			helpers.Ensure("pull", "--quiet", testutil.NginxAlpineImage)
+			helpers.Ensure("pull", "--quiet", testutil.CommonImage)
+
+			// A bigger archive first, so that the smaller one written over it has something to
+			// leave behind.
+			path := filepath.Join(data.Temp().Path(), reused)
+			helpers.Ensure("save", "-o", path, testutil.NginxAlpineImage)
+			info, err := os.Stat(path)
+			assert.NilError(t, err)
+			data.Labels().Set("bigger", strconv.FormatInt(info.Size(), 10))
+		},
+		Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+			return helpers.Command("save", "-o", filepath.Join(data.Temp().Path(), reused), testutil.CommonImage)
+		},
+		Expected: func(data test.Data, helpers test.Helpers) *test.Expected {
+			return &test.Expected{
+				ExitCode: expect.ExitCodeSuccess,
+				Output: func(stdout string, t tig.T) {
+					info, err := os.Stat(filepath.Join(data.Temp().Path(), reused))
+					assert.NilError(t, err)
+					bigger, err := strconv.ParseInt(data.Labels().Get("bigger"), 10, 64)
+					assert.NilError(t, err)
+
+					// The file must hold the smaller archive and nothing else. A tar reader stops
+					// at the end-of-archive marker, so a tail left over from the bigger archive
+					// would go unnoticed on read, but the file would still carry the bytes of an
+					// unrelated image.
+					assert.Assert(t, info.Size() < bigger,
+						"expected the file to shrink to the new archive, still %d of %d bytes",
+						info.Size(), bigger)
+				},
+			}
+		},
+	}
+
+	testCase.Run(t)
+}
+
+func TestSaveQuiet(t *testing.T) {
+	nerdtest.Setup()
+
+	testCase := &test.Case{
+		// --quiet is a nerdctl-specific flag, so this is skipped under the Docker compatibility mode.
+		Require: require.All(require.Not(require.Windows), require.Not(nerdtest.Docker)),
+		Setup: func(_ test.Data, helpers test.Helpers) {
+			helpers.Ensure("pull", "--quiet", testutil.CommonImage)
+		},
+		Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+			return helpers.Command("save", "--quiet", "-o", filepath.Join(data.Temp().Path(), "out.tar"), testutil.CommonImage)
+		},
+		Expected: func(data test.Data, _ test.Helpers) *test.Expected {
+			return &test.Expected{
+				ExitCode: expect.ExitCodeSuccess,
+				Output: func(_ string, t tig.T) {
+					// The archive is still written correctly with --quiet.
+					rootfsPath := filepath.Join(data.Temp().Path(), "rootfs")
+					err := testhelpers.ExtractDockerArchive(filepath.Join(data.Temp().Path(), "out.tar"), rootfsPath)
+					assert.NilError(t, err)
+					etcOSReleaseBytes, err := os.ReadFile(filepath.Join(rootfsPath, "/etc/os-release"))
+					assert.NilError(t, err)
+					assert.Assert(t, strings.Contains(string(etcOSReleaseBytes), "Alpine"))
 				},
 			}
 		},
@@ -188,7 +268,7 @@ func TestSaveMultipleImagesWithSameIDAndLoad(t *testing.T) {
 				return &test.Expected{
 					ExitCode: 0,
 					Errors:   []error{},
-					Output: func(stdout string, info string, t *testing.T) {
+					Output: func(stdout string, t tig.T) {
 						assert.Equal(t, strings.Count(stdout, data.Labels().Get("id")), 2)
 					},
 				}

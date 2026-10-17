@@ -58,16 +58,14 @@ func Inspect(ctx context.Context, client *containerd.Client, options types.Netwo
 		}
 
 		network := netList[0]
-		var filters = []string{fmt.Sprintf("labels.%q==%q", labels.Networks, []string{network.Name})}
 
+		var filters = []string{fmt.Sprintf(`labels.%q~="\\\"%s\\\""`, labels.Networks, network.Name)}
 		filteredContainers, err := client.Containers(ctx, filters...)
-
 		if err != nil {
 			return err
 		}
 
 		var containers []*native.Container
-
 		for _, container := range filteredContainers {
 			nativeContainer, err := containerinspector.Inspect(ctx, container)
 			if err != nil {
@@ -76,6 +74,7 @@ func Inspect(ctx context.Context, client *containerd.Client, options types.Netwo
 			if nativeContainer.Process == nil || nativeContainer.Process.Status.Status != containerd.Running {
 				continue
 			}
+
 			containers = append(containers, nativeContainer)
 		}
 
@@ -99,10 +98,7 @@ func Inspect(ctx context.Context, client *containerd.Client, options types.Netwo
 	}
 
 	if len(result) > 0 {
-		if formatErr := formatter.FormatSlice(options.Format, options.Stdout, result); formatErr != nil {
-			log.G(ctx).Error(formatErr)
-		}
-		err = nil
+		err = formatter.FormatInspectSlice(options.Format, options.Stdout, result)
 	} else {
 		err = errors.New("unable to find any network matching the provided request")
 	}

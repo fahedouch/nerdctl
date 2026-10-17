@@ -28,6 +28,7 @@ import (
 	"github.com/containerd/log"
 
 	"github.com/containerd/nerdctl/v2/pkg/labels"
+	"github.com/containerd/nerdctl/v2/pkg/netutil/networkstore"
 	"github.com/containerd/nerdctl/v2/pkg/rootlessutil"
 )
 
@@ -75,6 +76,17 @@ func ParseFlagP(s string) ([]cni.PortMapping, error) {
 
 	ip, hostPort, containerPort := splitParts(splitBySlash[0])
 
+	// Validate and normalize the host IP once. An empty IP is passed through to
+	// getUsedPorts below as "all interfaces"; for error messages and the resulting
+	// PortMapping it is normalized to 0.0.0.0.
+	if ip != "" && net.ParseIP(ip) == nil {
+		return nil, fmt.Errorf("invalid ip address: %s", ip)
+	}
+	hostIP := ip
+	if hostIP == "" {
+		hostIP = "0.0.0.0"
+	}
+
 	if containerPort == "" {
 		return nil, fmt.Errorf("no port specified: %s", splitBySlash[0])
 	}
@@ -101,27 +113,48 @@ func ParseFlagP(s string) ([]cni.PortMapping, error) {
 		if err != nil {
 			return nil, fmt.Errorf("invalid hostPort: %s", hostPort)
 		}
+		var usedPorts map[uint64]bool
+		usedPorts, err = getUsedPorts(ip, proto)
+		if err != nil {
+			return nil, err
+		}
+		if startPort == endPort && startHostPort != endHostPort {
+			// Docker-compatible behavior: a single container port with a host port
+			// range (e.g. "3000-3001:8080") treats the range as a pool and binds the
+			// container port to the first free host port in it, rather than silently
+			// collapsing to the first port and dropping the rest of the range.
+			// https://github.com/moby/moby/blob/master/daemon/libnetwork/portallocator/portallocator.go
+			found := false
+			for p := startHostPort; p <= endHostPort; p++ {
+				if !usedPorts[p] {
+					startHostPort, endHostPort = p, p
+					found = true
+					break
+				}
+			}
+			if !found {
+				return nil, fmt.Errorf("bind for %s failed: all ports in range %s are already allocated", hostIP, hostPort)
+			}
+		} else {
+			for i := startHostPort; i <= endHostPort; i++ {
+				if usedPorts[i] {
+					return nil, fmt.Errorf("bind for %s:%d failed: port is already allocated", hostIP, i)
+				}
+			}
+		}
 	}
 	if hostPort != "" && (endPort-startPort) != (endHostPort-startHostPort) {
-		if endPort != startPort {
-			return nil, fmt.Errorf("invalid ranges specified for container and host Ports: %s and %s", containerPort, hostPort)
-		}
+		// Both container and host sides are ranges but of unequal length — a genuine
+		// mismatch (the single-container-port pool case above has already collapsed
+		// the host range to one port, so it does not reach here).
+		return nil, fmt.Errorf("invalid ranges specified for container and host Ports: %s and %s", containerPort, hostPort)
 	}
 
 	for i := int32(0); i <= (int32(endPort) - int32(startPort)); i++ {
 
 		res.ContainerPort = int32(startPort) + i
 		res.HostPort = int32(startHostPort) + i
-		if ip == "" {
-			//TODO handle ipv6
-			res.HostIP = "0.0.0.0"
-		} else {
-			// TODO handle ipv6
-			if net.ParseIP(ip) == nil {
-				return nil, fmt.Errorf("invalid ip address: %s", ip)
-			}
-			res.HostIP = ip
-		}
+		res.HostIP = hostIP
 
 		mr = append(mr, res)
 	}
@@ -129,16 +162,35 @@ func ParseFlagP(s string) ([]cni.PortMapping, error) {
 	return mr, nil
 }
 
-// ParsePortsLabel parses JSON-marshalled string from label map
-// (under `labels.Ports` key) and returns []cni.PortMapping.
-func ParsePortsLabel(labelMap map[string]string) ([]cni.PortMapping, error) {
-	portsJSON := labelMap[labels.Ports]
-	if portsJSON == "" {
-		return []cni.PortMapping{}, nil
+func StoreNetworkConfig(dataStore, namespace, id string, netConf networkstore.NetworkConfig) error {
+	ns, err := networkstore.New(dataStore, namespace, id)
+	if err != nil {
+		return err
 	}
+	return ns.Acquire(netConf)
+}
+
+func LoadPortMappings(dataStore, namespace, id string, containerLabels map[string]string) ([]cni.PortMapping, error) {
 	var ports []cni.PortMapping
-	if err := json.Unmarshal([]byte(portsJSON), &ports); err != nil {
-		return nil, fmt.Errorf("failed to parse label %q=%q: %s", labels.Ports, portsJSON, err.Error())
+
+	ns, err := networkstore.New(dataStore, namespace, id)
+	if err != nil {
+		return ports, err
 	}
+	if err = ns.Load(); err != nil {
+		return ports, err
+	}
+	if len(ns.NetConf.PortMappings) != 0 {
+		return ns.NetConf.PortMappings, nil
+	}
+
+	portsJSON := containerLabels[labels.Ports]
+	if portsJSON == "" {
+		return ports, nil
+	}
+	if err := json.Unmarshal([]byte(portsJSON), &ports); err != nil {
+		return ports, fmt.Errorf("failed to parse label %q=%q: %s", labels.Ports, portsJSON, err.Error())
+	}
+	log.L.Warnf("container %s (%s) is using legacy port mapping configuration. To ensure compatibility with the new port mapping logic, please recreate this container. For more details, see: https://github.com/containerd/nerdctl/pull/4290", containerLabels[labels.Name], id[:12])
 	return ports, nil
 }

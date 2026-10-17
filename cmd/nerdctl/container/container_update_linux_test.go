@@ -17,17 +17,65 @@
 package container
 
 import (
+	"errors"
 	"testing"
 
+	"github.com/containerd/nerdctl/mod/tigron/expect"
+	"github.com/containerd/nerdctl/mod/tigron/require"
+	"github.com/containerd/nerdctl/mod/tigron/test"
+
 	"github.com/containerd/nerdctl/v2/pkg/testutil"
+	"github.com/containerd/nerdctl/v2/pkg/testutil/nerdtest"
 )
 
 func TestUpdateContainer(t *testing.T) {
-	testutil.DockerIncompatible(t)
-	testContainerName := testutil.Identifier(t)
-	base := testutil.NewBase(t)
-	base.Cmd("run", "-d", "--name", testContainerName, testutil.CommonImage, "sleep", "infinity").AssertOK()
-	defer base.Cmd("rm", "-f", testContainerName).Run()
-	base.Cmd("update", "--memory", "999999999", "--restart", "123", testContainerName).AssertFail()
-	base.Cmd("inspect", "--mode=native", testContainerName).AssertOutNotContains(`"limit": 999999999,`)
+	testCase := nerdtest.Setup()
+
+	testCase.Setup = func(data test.Data, helpers test.Helpers) {
+		containerName := data.Identifier()
+		data.Labels().Set("containerName", containerName)
+		helpers.Ensure("run", "-d", "--name", containerName, testutil.CommonImage, "sleep", nerdtest.Infinity)
+		nerdtest.EnsureContainerStarted(helpers, containerName)
+	}
+
+	testCase.Cleanup = func(data test.Data, helpers test.Helpers) {
+		containerName := data.Labels().Get("containerName")
+		helpers.Anyhow("rm", "-f", containerName)
+	}
+
+	testCase.SubTests = []*test.Case{
+		{
+			Description: "should fail on unsupported restart policy value",
+			NoParallel:  true,
+			Require:     require.Not(nerdtest.Docker),
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				containerName := data.Labels().Get("containerName")
+				return helpers.Command("update", "--memory", "999999999", "--restart", "123", containerName)
+			},
+			Expected: test.Expects(1, []error{errors.New("unsupported restart policy")}, nil),
+		},
+		{
+			Description: "should not update memory in inspect",
+			NoParallel:  true,
+			Require:     require.Not(nerdtest.Docker),
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				containerName := data.Labels().Get("containerName")
+				return helpers.Command("inspect", "--mode=native", containerName)
+			},
+			Expected: test.Expects(expect.ExitCodeSuccess, nil, expect.DoesNotContain(`"limit": 999999999,`)),
+		},
+		{
+			Description: "should persist the quota and period converted from --cpus",
+			NoParallel:  true,
+			Require:     nerdtest.CGroupV2,
+			Command: func(data test.Data, helpers test.Helpers) test.TestableCommand {
+				containerName := data.Labels().Get("containerName")
+				helpers.Ensure("update", "--cpus", "0.5", containerName)
+				return helpers.Command("exec", containerName, "cat", "/sys/fs/cgroup/cpu.max")
+			},
+			Expected: test.Expects(expect.ExitCodeSuccess, nil, expect.Contains("50000 100000")),
+		},
+	}
+
+	testCase.Run(t)
 }

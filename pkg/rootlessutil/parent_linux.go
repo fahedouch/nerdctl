@@ -27,6 +27,8 @@ import (
 	"syscall"
 
 	"github.com/containerd/log"
+
+	"github.com/containerd/nerdctl/v2/pkg/internal/filesystem"
 )
 
 func IsRootlessParent() bool {
@@ -55,7 +57,7 @@ func RootlessKitChildPid(stateDir string) (int, error) {
 		return 0, err
 	}
 
-	pidFileBytes, err := os.ReadFile(pidFilePath)
+	pidFileBytes, err := filesystem.ReadFile(pidFilePath)
 	if err != nil {
 		return 0, err
 	}
@@ -89,10 +91,13 @@ func ParentMain(hostGatewayIP string) error {
 	if err != nil {
 		return err
 	}
-	// args are compatible with both util-linux nsenter and busybox nsenter
-	args := []string{
-		"-r/", // root dir (busybox nsenter wants this to be explicitly specified),
-	}
+	// -r/ (root dir) is intentionally omitted. nsenter would open the host
+	// root fd before setns, then chroot to it after entering the mount
+	// namespace, anchoring the process to host paths. In rootless mode,
+	// host dirs owned by real uid 0 (e.g. /var/lib/containerd) are
+	// inaccessible inside the user namespace and overlay mounts would
+	// fail with EACCES.
+	args := []string{arg0}
 
 	// Only append wd if we do have a working dir
 	// - https://github.com/rootless-containers/usernetes/pull/327

@@ -20,6 +20,7 @@ The path can be overridden with `$NERDCTL_TOML`.
 
 debug          = false
 debug_full     = false
+log_file       = "/var/log/nerdctl.log"
 address        = "unix:///run/k3s/containerd/containerd.sock"
 namespace      = "k8s.io"
 snapshotter    = "stargz"
@@ -27,14 +28,19 @@ cgroup_manager = "cgroupfs"
 hosts_dir      = ["/etc/containerd/certs.d", "/etc/docker/certs.d"]
 experimental   = true
 userns_remap   = ""
+dns            = ["8.8.8.8", "1.1.1.1"]
+dns_opts       = ["ndots:1", "timeout:2"]
+dns_search     = ["example.com", "example.org"]
+selinux_enabled= true
 ```
 
 ## Properties
 
-| TOML property       | CLI flag                           | Env var                   | Description                                                                                                                                                      | Availability \*1 |
+| TOML property       | CLI flag                           | Env var                   | Description                                                                                                                                                      | Availability |
 |---------------------|------------------------------------|---------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------|------------------|
 | `debug`             | `--debug`                          |                           | Debug mode                                                                                                                                                       | Since 0.16.0     |
 | `debug_full`        | `--debug-full`                     |                           | Debug mode (with full output)                                                                                                                                    | Since 0.16.0     |
+| `log_file`          | `--log-file`                       | `$NERDCTL_LOG_FILE`       | Append nerdctl's own log to this file, in addition to the standard error. Combine with `debug` to record a full trace                                            | Since 2.4.0      |
 | `address`           | `--address`,`--host`,`-a`,`-H`     | `$CONTAINERD_ADDRESS`     | containerd address                                                                                                                                               | Since 0.16.0     |
 | `namespace`         | `--namespace`,`-n`                 | `$CONTAINERD_NAMESPACE`   | containerd namespace                                                                                                                                             | Since 0.16.0     |
 | `snapshotter`       | `--snapshotter`,`--storage-driver` | `$CONTAINERD_SNAPSHOTTER` | containerd snapshotter                                                                                                                                           | Since 0.16.0     |
@@ -50,6 +56,10 @@ userns_remap   = ""
 | `kube_hide_dupe`    | `--kube-hide-dupe`                 |                           | Deduplicate images for Kubernetes with namespace k8s.io, no more redundant <none> ones are displayed    | Since 2.0.3      |
 | `cdi_spec_dirs`     | `--cdi-spec-dirs`                   |                          | The folders to use when searching for CDI ([container-device-interface](https://github.com/cncf-tags/container-device-interface)) specifications.    | Since 2.1.0 |
 | `userns_remap`      | `--userns-remap`                   |                           | Support idmapping of containers. This options is only supported on rootful linux. If `host` is passed, no idmapping is done. if a user name is passed, it does idmapping based on the uidmap and gidmap ranges specified in /etc/subuid and /etc/subgid respectively. |   Since 2.1.0 |
+| `dns`               |                                    |                           | Set global DNS servers for containers                                                                                                                  | Since 2.1.3 |
+| `dns_opts`          |                                    |                           | Set global DNS options for containers                                                                                                                         | Since 2.1.3 |
+| `dns_search`        |                                    |                           | Set global DNS search domains for containers                                                                                                           | Since 2.1.3 |
+| `selinux_enabled`        |                                    |                           |Enable selinux support for containers                                                                                                           | Since 2.3.0 |
 
 The properties are parsed in the following precedence:
 1. CLI flag
@@ -57,7 +67,6 @@ The properties are parsed in the following precedence:
 3. TOML property
 4. Built-in default value (Run `nerdctl --help` to see the default values)
 
-\*1: Availability of the TOML properties
 
 ## See also
 - [`registry.md`](registry.md)

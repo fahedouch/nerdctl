@@ -33,20 +33,26 @@ import (
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/images/converter"
+	erofsconvert "github.com/containerd/containerd/v2/core/images/converter/erofs"
 	"github.com/containerd/containerd/v2/core/images/converter/uncompress"
 	"github.com/containerd/log"
 	nydusconvert "github.com/containerd/nydus-snapshotter/pkg/converter"
+	"github.com/containerd/platforms"
 	"github.com/containerd/stargz-snapshotter/estargz"
 	estargzconvert "github.com/containerd/stargz-snapshotter/nativeconverter/estargz"
 	estargzexternaltocconvert "github.com/containerd/stargz-snapshotter/nativeconverter/estargz/externaltoc"
 	zstdchunkedconvert "github.com/containerd/stargz-snapshotter/nativeconverter/zstdchunked"
 	"github.com/containerd/stargz-snapshotter/recorder"
+	estargzdecompressutil "github.com/containerd/stargz-snapshotter/util/decompressutil"
 
 	"github.com/containerd/nerdctl/v2/pkg/api/types"
 	"github.com/containerd/nerdctl/v2/pkg/clientutil"
+	"github.com/containerd/nerdctl/v2/pkg/containerdutil"
 	converterutil "github.com/containerd/nerdctl/v2/pkg/imgutil/converter"
+	"github.com/containerd/nerdctl/v2/pkg/imgutil/jobs"
 	"github.com/containerd/nerdctl/v2/pkg/platformutil"
 	"github.com/containerd/nerdctl/v2/pkg/referenceutil"
+	"github.com/containerd/nerdctl/v2/pkg/snapshotterutil"
 )
 
 func Convert(ctx context.Context, client *containerd.Client, srcRawRef, targetRawRef string, options types.ImageConvertOptions) error {
@@ -86,8 +92,10 @@ func Convert(ctx context.Context, client *containerd.Client, srcRawRef, targetRa
 	zstdchunked := options.ZstdChunked
 	overlaybd := options.Overlaybd
 	nydus := options.Nydus
+	soci := options.Soci
+	erofs := options.Erofs != ""
 	var finalize func(ctx context.Context, cs content.Store, ref string, desc *ocispec.Descriptor) (*images.Image, error)
-	if estargz || zstd || zstdchunked || overlaybd || nydus {
+	if estargz || zstd || zstdchunked || overlaybd || nydus || soci || erofs {
 		convertCount := 0
 		if estargz {
 			convertCount++
@@ -104,12 +112,19 @@ func Convert(ctx context.Context, client *containerd.Client, srcRawRef, targetRa
 		if nydus {
 			convertCount++
 		}
+		if soci {
+			convertCount++
+		}
+		if erofs {
+			convertCount++
+		}
 
 		if convertCount > 1 {
-			return errors.New("options --estargz, --zstdchunked, --overlaybd and --nydus lead to conflict, only one of them can be used")
+			return errors.New("options --estargz, --zstdchunked, --overlaybd, --nydus, --soci and --erofs lead to conflict, only one of them can be used")
 		}
 
 		var convertFunc converter.ConvertFunc
+		var updateManifestFunc converter.UpdateManifestFunc
 		var convertType string
 		switch {
 		case estargz:
@@ -140,6 +155,12 @@ func Convert(ctx context.Context, client *containerd.Client, srcRawRef, targetRa
 			convertFunc = overlaybdconvert.IndexConvertFunc(obdOpts...)
 			convertOpts = append(convertOpts, converter.WithIndexConvertFunc(convertFunc))
 			convertType = "overlaybd"
+		case erofs:
+			convertFunc, updateManifestFunc, err = getErofsConverter(options)
+			if err != nil {
+				return err
+			}
+			convertType = "erofs"
 		case nydus:
 			nydusOpts, err := getNydusConvertOpts(options)
 			if err != nil {
@@ -164,10 +185,23 @@ func Convert(ctx context.Context, client *containerd.Client, srcRawRef, targetRa
 				)),
 			)
 			convertType = "nydus"
+		case soci:
+			// Convert image to SOCI format
+			convertedRef, err := snapshotterutil.ConvertSociIndexV2(ctx, client, srcRef, targetRef, options.GOptions, options.SociOptions)
+			if err != nil {
+				return fmt.Errorf("failed to convert image to SOCI format: %w", err)
+			}
+			res := converterutil.ConvertedImageInfo{
+				Image: convertedRef,
+			}
+			return printConvertedImage(options.Stdout, options, res)
 		}
 
 		if convertType != "overlaybd" {
 			convertOpts = append(convertOpts, converter.WithLayerConvertFunc(convertFunc))
+		}
+		if updateManifestFunc != nil {
+			convertOpts = append(convertOpts, converter.WithUpdateManifest(updateManifestFunc))
 		}
 		if !options.Oci {
 			if nydus || overlaybd {
@@ -187,6 +221,25 @@ func Convert(ctx context.Context, client *containerd.Client, srcRawRef, targetRa
 
 	if options.Oci {
 		convertOpts = append(convertOpts, converter.WithDockerToOCI(true))
+	}
+
+	if options.ProgressOutput != nil {
+		ongoing := jobs.New(targetRef)
+		if err := addDescriptorsToJobs(ctx, client, srcRef, platMC, ongoing); err != nil {
+			return err
+		}
+
+		progressCtx, cancelProgress := context.WithCancel(ctx)
+		progressDone := make(chan struct{})
+
+		go func() {
+			jobs.ShowProgress(progressCtx, ongoing, client.ContentStore(), options.ProgressOutput)
+			close(progressDone)
+		}()
+		defer func() {
+			cancelProgress()
+			<-progressDone
+		}()
 	}
 
 	// converter.Convert() gains the lease by itself
@@ -248,6 +301,30 @@ func getESGZConverter(options types.ImageConvertOptions) (convertFunc converter.
 	return convertFunc, finalize, nil
 }
 
+func addDescriptorsToJobs(ctx context.Context, client *containerd.Client, srcRef string, platMC platforms.MatchComparer, ongoing *jobs.Jobs) error {
+	imageService := client.ImageService()
+	img, err := imageService.Get(ctx, srcRef)
+	if err != nil {
+		return err
+	}
+
+	provider := containerdutil.NewProvider(client)
+	handler := images.ChildrenHandler(provider)
+	if platMC != nil {
+		handler = images.HandlerFunc(func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
+			if desc.Platform != nil && !platMC.Match(*desc.Platform) {
+				return nil, nil
+			}
+			return images.Children(ctx, provider, desc)
+		})
+	}
+
+	return images.Walk(ctx, images.HandlerFunc(func(ctx context.Context, desc ocispec.Descriptor) ([]ocispec.Descriptor, error) {
+		ongoing.Add(desc)
+		return handler(ctx, desc)
+	}), img.Target)
+}
+
 func getESGZConvertOpts(options types.ImageConvertOptions) ([]estargz.Option, error) {
 
 	esgzOpts := []estargz.Option{
@@ -269,6 +346,13 @@ func getESGZConvertOpts(options types.ImageConvertOptions) ([]estargz.Option, er
 		esgzOpts = append(esgzOpts, estargz.WithPrioritizedFiles(paths))
 		var ignored []string
 		esgzOpts = append(esgzOpts, estargz.WithAllowPrioritizeNotFound(&ignored))
+	}
+	if options.EstargzGzipHelper != "" {
+		gzipHelperFunc, err := estargzdecompressutil.GetGzipHelperFunc(options.EstargzGzipHelper)
+		if err != nil {
+			return nil, err
+		}
+		esgzOpts = append(esgzOpts, estargz.WithGzipHelperFunc(gzipHelperFunc))
 	}
 	return esgzOpts, nil
 }
@@ -300,6 +384,24 @@ func getZstdchunkedConverter(options types.ImageConvertOptions) (converter.Conve
 	return zstdchunkedconvert.LayerConvertFuncWithCompressionLevel(zstd.EncoderLevelFromZstd(options.ZstdChunkedCompressionLevel), esgzOpts...), nil
 }
 
+func getErofsConverter(options types.ImageConvertOptions) (converter.ConvertFunc, converter.UpdateManifestFunc, error) {
+	var convertOpts []erofsconvert.ConvertOpt
+	switch options.Erofs {
+	case "raw":
+	case "zstd":
+		convertOpts = append(convertOpts, erofsconvert.WithBlobCompression("zstd"))
+	default:
+		return nil, nil, fmt.Errorf("invalid value %q for --erofs, supported values are: raw, zstd", options.Erofs)
+	}
+	if options.ErofsCompressors != "" {
+		convertOpts = append(convertOpts, erofsconvert.WithCompressors(options.ErofsCompressors))
+	}
+	if options.ErofsMkfsOptions != "" {
+		convertOpts = append(convertOpts, erofsconvert.WithMkfsOptions(strings.Fields(options.ErofsMkfsOptions)))
+	}
+	return erofsconvert.LayerConvertFunc(convertOpts...), erofsconvert.UpdateManifestPlatform, nil
+}
+
 func getNydusConvertOpts(options types.ImageConvertOptions) (*nydusconvert.PackOption, error) {
 	workDir := options.NydusWorkDir
 	if workDir == "" {
@@ -325,6 +427,7 @@ func getOBDConvertOpts(options types.ImageConvertOptions) ([]overlaybdconvert.Op
 	obdOpts := []overlaybdconvert.Option{
 		overlaybdconvert.WithFsType(options.OverlayFsType),
 		overlaybdconvert.WithDbstr(options.OverlaydbDBStr),
+		overlaybdconvert.WithVsize(options.OverlaybdVsize),
 	}
 	return obdOpts, nil
 }

@@ -29,10 +29,11 @@ import (
 	"time"
 
 	"github.com/compose-spec/compose-go/v2/types"
+	cdiparser "tags.cncf.io/container-device-interface/pkg/parser"
 
-	"github.com/containerd/containerd/v2/contrib/nvidia"
 	"github.com/containerd/log"
 
+	"github.com/containerd/nerdctl/v2/pkg/healthcheck"
 	"github.com/containerd/nerdctl/v2/pkg/identifiers"
 	"github.com/containerd/nerdctl/v2/pkg/reflectutil"
 )
@@ -61,6 +62,8 @@ func warnUnknownFields(svc types.ServiceConfig) {
 		"BlkioConfig",
 		"CapAdd",
 		"CapDrop",
+		"Cgroup",
+		"CgroupParent",
 		"CPUS",
 		"CPUSet",
 		"CPUShares",
@@ -79,6 +82,7 @@ func warnUnknownFields(svc types.ServiceConfig) {
 		"Extends", // handled by the loader
 		"Extensions",
 		"ExtraHosts",
+		"HealthCheck",
 		"Hostname",
 		"Image",
 		"Init",
@@ -119,6 +123,21 @@ func warnUnknownFields(svc types.ServiceConfig) {
 			"Weight",
 		); len(unknown) > 0 {
 			log.L.Warnf("Ignoring: service %s: blkio_config: %+v", svc.Name, unknown)
+		}
+	}
+
+	if svc.HealthCheck != nil {
+		if unknown := reflectutil.UnknownNonEmptyFields(svc.HealthCheck,
+			"Test",
+			"Timeout",
+			"Interval",
+			"Retries",
+			"StartPeriod",
+			"Disable",
+			"Extensions",
+			// TODO: add support 'StartInterval'
+		); len(unknown) > 0 {
+			log.L.Warnf("Ignoring: service %s: healthcheck: %+v", svc.Name, unknown)
 		}
 	}
 
@@ -195,17 +214,24 @@ type Container struct {
 }
 
 type Build struct {
-	Force     bool     // force build even if already present
-	BuildArgs []string // {"-t", "example.com/foo", "--target", "foo", "/path/to/ctx"}
+	Force            bool     // force build even if already present
+	BuildArgs        []string // {"-t", "example.com/foo", "--target", "foo", "/path/to/ctx"}
+	DockerfileInline string   // store contents of dockerfile_inline field is specified
 	// TODO: call BuildKit API directly without executing `nerdctl build`
 }
 
+type ImageMountSource struct {
+	Source   string
+	Platform string
+}
+
 type Service struct {
-	Image      string
-	PullMode   string
-	Containers []Container // length = replicas
-	Build      *Build
-	Unparsed   *types.ServiceConfig
+	Image             string
+	PullMode          string
+	Containers        []Container // length = replicas
+	Build             *Build
+	Unparsed          *types.ServiceConfig
+	ImageMountSources []ImageMountSource
 }
 
 func getReplicas(svc types.ServiceConfig) (int, error) {
@@ -261,9 +287,17 @@ func getMemLimit(svc types.ServiceConfig) (types.UnitBytes, error) {
 func getGPUs(svc types.ServiceConfig) (reqs []string, _ error) {
 	// "gpu" and "nvidia" are also allowed capabilities (but not used as nvidia driver capabilities)
 	// https://github.com/moby/moby/blob/v20.10.7/daemon/nvidia_linux.go#L37
-	capset := map[string]struct{}{"gpu": {}, "nvidia": {}}
-	for _, c := range nvidia.AllCaps() {
-		capset[string(c)] = struct{}{}
+	capset := map[string]struct{}{
+		"gpu": {}, "nvidia": {},
+		// Allow the list of capabilities here (excluding "all" and "none")
+		// https://github.com/NVIDIA/nvidia-container-toolkit/blob/ff7c2d4866a7d46d1bf2a83590b263e10ec99cb5/internal/config/image/capabilities.go#L28-L38
+		"compat32": {},
+		"compute":  {},
+		"display":  {},
+		"graphics": {},
+		"ngx":      {},
+		"utility":  {},
+		"video":    {},
 	}
 	if svc.Deploy != nil && svc.Deploy.Resources.Reservations != nil {
 		for _, dev := range svc.Deploy.Resources.Reservations.Devices {
@@ -409,8 +443,24 @@ func getNetworks(project *types.Project, svc types.ServiceConfig) ([]networkName
 	return fullNames, nil
 }
 
+func imageVolumeSources(svc types.ServiceConfig) []ImageMountSource {
+	imageMountSources := make([]ImageMountSource, 0, len(svc.Volumes))
+	for _, volume := range svc.Volumes {
+		if volume.Type != types.VolumeTypeImage {
+			continue
+		}
+
+		imageMountSources = append(imageMountSources, ImageMountSource{
+			Source:   volume.Source,
+			Platform: svc.Platform,
+		})
+	}
+	return imageMountSources
+}
+
 func Parse(project *types.Project, svc types.ServiceConfig) (*Service, error) {
 	warnUnknownFields(svc)
+	imageMountSources := imageVolumeSources(svc)
 
 	replicas, err := getReplicas(svc)
 	if err != nil {
@@ -418,10 +468,11 @@ func Parse(project *types.Project, svc types.ServiceConfig) (*Service, error) {
 	}
 
 	parsed := &Service{
-		Image:      svc.Image,
-		PullMode:   "missing",
-		Containers: make([]Container, replicas),
-		Unparsed:   &svc,
+		Image:             svc.Image,
+		ImageMountSources: imageMountSources,
+		PullMode:          "missing",
+		Containers:        make([]Container, replicas),
+		Unparsed:          &svc,
 	}
 
 	if svc.Build == nil {
@@ -450,7 +501,7 @@ func Parse(project *types.Project, svc types.ServiceConfig) (*Service, error) {
 		parsed.Build.Force = true
 		parsed.PullMode = "never"
 	default:
-		log.L.Warnf("Ignoring: service %s: pull_policy: %q", svc.Name, svc.PullPolicy)
+		return nil, fmt.Errorf("invalid --pull option %q", svc.PullPolicy)
 	}
 
 	for i := 0; i < replicas; i++ {
@@ -514,7 +565,21 @@ func newContainer(project *types.Project, parsed *Service, i int) (*Container, e
 		c.RunArgs = append(c.RunArgs, fmt.Sprintf("--cpu-shares=%d", svc.CPUShares))
 	}
 
+	if svc.Cgroup != "" {
+		c.RunArgs = append(c.RunArgs, fmt.Sprintf("--cgroupns=%s", svc.Cgroup))
+	}
+
+	if svc.CgroupParent != "" {
+		c.RunArgs = append(c.RunArgs, fmt.Sprintf("--cgroup-parent=%s", svc.CgroupParent))
+	}
+
 	for _, v := range svc.Devices {
+		// A CDI device is passed by its qualified name alone; `nerdctl run`
+		// only recognizes the name when nothing is appended to it.
+		if cdiparser.IsQualifiedName(v.Source) {
+			c.RunArgs = append(c.RunArgs, fmt.Sprintf("--device=%s", v.Source))
+			continue
+		}
 		c.RunArgs = append(c.RunArgs, fmt.Sprintf("--device=%s:%s:%s", v.Source, v.Target, v.Permissions))
 	}
 
@@ -694,11 +759,27 @@ func newContainer(project *types.Project, parsed *Service, i int) (*Container, e
 	}
 
 	for _, v := range svc.Volumes {
+		if v.Type == types.VolumeTypeImage {
+			mount, err := serviceVolumeConfigToImageMount(v)
+			if err != nil {
+				return nil, err
+			}
+			c.RunArgs = append(c.RunArgs, "--mount="+mount)
+			continue
+		}
+
 		vStr, mkdir, err := serviceVolumeConfigToFlagV(v, project)
 		if err != nil {
 			return nil, err
 		}
-		c.RunArgs = append(c.RunArgs, "-v="+vStr)
+
+		switch v.Type {
+		case types.VolumeTypeTmpfs:
+			c.RunArgs = append(c.RunArgs, "--tmpfs="+vStr)
+		default:
+			c.RunArgs = append(c.RunArgs, "-v="+vStr)
+		}
+
 		c.Mkdir = mkdir
 	}
 
@@ -730,6 +811,46 @@ func newContainer(project *types.Project, parsed *Service, i int) (*Container, e
 
 	if svc.WorkingDir != "" {
 		c.RunArgs = append(c.RunArgs, "-w="+svc.WorkingDir)
+	}
+
+	if svc.HealthCheck != nil {
+		hc := svc.HealthCheck
+		disabled := hc.Disable
+
+		if !disabled && len(hc.Test) > 0 {
+			switch hc.Test[0] {
+			case healthcheck.CmdNone:
+				disabled = true
+			case healthcheck.CmdShell:
+				if len(hc.Test) >= 2 {
+					c.RunArgs = append(c.RunArgs, fmt.Sprintf("--health-cmd=%s", hc.Test[1]))
+				}
+			case healthcheck.Cmd:
+				// CMD exec form is converted to CMD-SHELL because --health-cmd always stores
+				// the command as CMD-SHELL (see pkg/cmd/container/create.go: withHealthcheck).
+				// This means the command will be executed via /bin/sh -c instead of exec directly.
+				if len(hc.Test) >= 2 {
+					log.L.Warnf("service %s: healthcheck: CMD exec form is not supported, converting to CMD-SHELL", svc.Name)
+					c.RunArgs = append(c.RunArgs, fmt.Sprintf("--health-cmd=%s", strings.Join(hc.Test[1:], " ")))
+				}
+			}
+		}
+		if disabled {
+			c.RunArgs = append(c.RunArgs, "--no-healthcheck")
+		} else {
+			if hc.Interval != nil {
+				c.RunArgs = append(c.RunArgs, fmt.Sprintf("--health-interval=%s", time.Duration(*hc.Interval).String()))
+			}
+			if hc.Timeout != nil {
+				c.RunArgs = append(c.RunArgs, fmt.Sprintf("--health-timeout=%s", time.Duration(*hc.Timeout).String()))
+			}
+			if hc.Retries != nil {
+				c.RunArgs = append(c.RunArgs, fmt.Sprintf("--health-retries=%d", *hc.Retries))
+			}
+			if hc.StartPeriod != nil {
+				c.RunArgs = append(c.RunArgs, fmt.Sprintf("--health-start-period=%s", time.Duration(*hc.StartPeriod).String()))
+			}
+		}
 	}
 
 	c.RunArgs = append(c.RunArgs, parsed.Image) // NOT svc.Image
@@ -769,6 +890,45 @@ func servicePortConfigToFlagP(c types.ServicePortConfig) (string, error) {
 	return s, nil
 }
 
+func serviceVolumeConfigToImageMount(c types.ServiceVolumeConfig) (string, error) {
+	if c.Source == "" {
+		return "", errors.New("image volume source is missing")
+	}
+	if strings.Contains(c.Source, ",") {
+		return "", errors.New("image volume source must not contain commas")
+	}
+	if c.Target == "" {
+		return "", errors.New("volume target is missing")
+	}
+	if !filepath.IsAbs(c.Target) {
+		return "", fmt.Errorf("volume target must be an absolute path, got %q", c.Target)
+	}
+	if strings.Contains(c.Target, ",") {
+		return "", errors.New("volume target must not contain commas")
+	}
+	if c.Bind != nil {
+		return "", errors.New("image volume does not support bind options")
+	}
+	if c.Volume != nil {
+		return "", errors.New("image volume does not support volume options")
+	}
+	if c.Tmpfs != nil {
+		return "", errors.New("image volume does not support tmpfs options")
+	}
+	if c.Consistency != "" {
+		return "", errors.New("image volume does not support consistency options")
+	}
+	if c.Image != nil && c.Image.SubPath != "" {
+		return "", errors.New("image.subpath is not yet supported")
+	}
+
+	mount := fmt.Sprintf("type=%s,source=%s,target=%s", types.VolumeTypeImage, c.Source, c.Target)
+	if c.ReadOnly {
+		mount += ",readonly"
+	}
+	return mount, nil
+}
+
 func serviceVolumeConfigToFlagV(c types.ServiceVolumeConfig, project *types.Project) (flagV string, mkdir []string, err error) {
 	if unknown := reflectutil.UnknownNonEmptyFields(&c,
 		"Type",
@@ -777,6 +937,7 @@ func serviceVolumeConfigToFlagV(c types.ServiceVolumeConfig, project *types.Proj
 		"ReadOnly",
 		"Bind",
 		"Volume",
+		"Tmpfs",
 	); len(unknown) > 0 {
 		log.L.Warnf("Ignoring: volume: %+v", unknown)
 	}
@@ -797,6 +958,29 @@ func serviceVolumeConfigToFlagV(c types.ServiceVolumeConfig, project *types.Proj
 	}
 	if !filepath.IsAbs(c.Target) {
 		return "", nil, fmt.Errorf("volume target must be an absolute path, got %q", c.Target)
+	}
+
+	if c.Type == "tmpfs" {
+		var opts []string
+
+		if c.ReadOnly {
+			opts = append(opts, "ro")
+		}
+		if c.Tmpfs != nil {
+			if c.Tmpfs.Size != 0 {
+				opts = append(opts, fmt.Sprintf("size=%d", c.Tmpfs.Size))
+			}
+			if c.Tmpfs.Mode != 0 {
+				opts = append(opts, fmt.Sprintf("mode=%o", c.Tmpfs.Mode))
+			}
+		}
+
+		s := c.Target
+		if len(opts) > 0 {
+			s = fmt.Sprintf("%s:%s", s, strings.Join(opts, ","))
+		}
+
+		return s, mkdir, nil
 	}
 
 	if c.Source == "" {

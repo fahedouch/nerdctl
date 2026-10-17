@@ -31,6 +31,7 @@ import (
 	"github.com/containerd/log"
 
 	"github.com/containerd/nerdctl/v2/cmd/nerdctl/builder"
+	"github.com/containerd/nerdctl/v2/cmd/nerdctl/checkpoint"
 	"github.com/containerd/nerdctl/v2/cmd/nerdctl/completion"
 	"github.com/containerd/nerdctl/v2/cmd/nerdctl/compose"
 	"github.com/containerd/nerdctl/v2/cmd/nerdctl/container"
@@ -40,8 +41,10 @@ import (
 	"github.com/containerd/nerdctl/v2/cmd/nerdctl/internal"
 	"github.com/containerd/nerdctl/v2/cmd/nerdctl/ipfs"
 	"github.com/containerd/nerdctl/v2/cmd/nerdctl/login"
+	"github.com/containerd/nerdctl/v2/cmd/nerdctl/manifest"
 	"github.com/containerd/nerdctl/v2/cmd/nerdctl/namespace"
 	"github.com/containerd/nerdctl/v2/cmd/nerdctl/network"
+	"github.com/containerd/nerdctl/v2/cmd/nerdctl/search"
 	"github.com/containerd/nerdctl/v2/cmd/nerdctl/system"
 	"github.com/containerd/nerdctl/v2/cmd/nerdctl/volume"
 	"github.com/containerd/nerdctl/v2/pkg/config"
@@ -61,7 +64,9 @@ var (
 // usage was derived from https://github.com/spf13/cobra/blob/v1.2.1/command.go#L491-L514
 func usage(c *cobra.Command) error {
 	s := "Usage: "
-	if c.Runnable() {
+	if c.HasSubCommands() {
+		s += c.CommandPath() + " [command]\n"
+	} else if c.Runnable() {
 		s += c.UseLine() + "\n"
 	} else {
 		s += c.CommandPath() + " [command]\n"
@@ -109,7 +114,7 @@ func usage(c *cobra.Command) error {
 		t += "\n"
 		return t
 	}
-	s += printCommands("helpers.Management commands", managementCommands)
+	s += printCommands("Management commands", managementCommands)
 	s += printCommands("Commands", nonManagementCommands)
 
 	s += Bold("Flags") + ":\n"
@@ -165,6 +170,7 @@ func initRootCmdFlags(rootCmd *cobra.Command, tomlPath string) (*pflag.FlagSet, 
 
 	rootCmd.PersistentFlags().Bool("debug", cfg.Debug, "debug mode")
 	rootCmd.PersistentFlags().Bool("debug-full", cfg.DebugFull, "debug mode (with full output)")
+	helpers.AddPersistentStringFlag(rootCmd, "log-file", nil, nil, nil, aliasToBeInherited, cfg.LogFile, "NERDCTL_LOG_FILE", "Append nerdctl's own log to this file, in addition to the standard error")
 	// -a is aliases (conflicts with nerdctl images -a)
 	helpers.AddPersistentStringFlag(rootCmd, "address", []string{"a", "H"}, nil, []string{"host"}, aliasToBeInherited, cfg.Address, "CONTAINERD_ADDRESS", `containerd address, optionally with "unix://" prefix`)
 	// -n is aliases (conflicts with nerdctl logs -n)
@@ -186,8 +192,12 @@ func initRootCmdFlags(rootCmd *cobra.Command, tomlPath string) (*pflag.FlagSet, 
 	helpers.AddPersistentStringFlag(rootCmd, "host-gateway-ip", nil, nil, nil, aliasToBeInherited, cfg.HostGatewayIP, "NERDCTL_HOST_GATEWAY_IP", "IP address that the special 'host-gateway' string in --add-host resolves to. Defaults to the IP address of the host. It has no effect without setting --add-host")
 	helpers.AddPersistentStringFlag(rootCmd, "bridge-ip", nil, nil, nil, aliasToBeInherited, cfg.BridgeIP, "NERDCTL_BRIDGE_IP", "IP address for the default nerdctl bridge network")
 	rootCmd.PersistentFlags().Bool("kube-hide-dupe", cfg.KubeHideDupe, "Deduplicate images for Kubernetes with namespace k8s.io")
+	rootCmd.PersistentFlags().Bool("selinux-enabled", cfg.SelinuxEnabled, "Enable selinux support")
 	rootCmd.PersistentFlags().StringSlice("cdi-spec-dirs", cfg.CDISpecDirs, "The directories to search for CDI spec files. Defaults to /etc/cdi,/var/run/cdi")
 	rootCmd.PersistentFlags().String("userns-remap", cfg.UsernsRemap, "Support idmapping for creating and running containers. This options is only supported on linux. If `host` is passed, no idmapping is done. if a user name is passed, it does idmapping based on the uidmap and gidmap ranges specified in /etc/subuid and /etc/subgid respectively")
+	helpers.HiddenPersistentStringArrayFlag(rootCmd, "global-dns", cfg.DNS, "Global DNS servers for containers")
+	helpers.HiddenPersistentStringArrayFlag(rootCmd, "global-dns-opts", cfg.DNSOpts, "Global DNS options for containers")
+	helpers.HiddenPersistentStringArrayFlag(rootCmd, "global-dns-search", cfg.DNSSearch, "Global DNS search domains for containers")
 	return aliasToBeInherited, nil
 }
 
@@ -234,6 +244,13 @@ Config file ($NERDCTL_TOML): %s
 		if debug {
 			log.SetLevel(log.DebugLevel.String())
 		}
+		if globalOptions.LogFile != "" {
+			// The handle is deliberately not kept: log.L.Fatal terminates the process,
+			// so a deferred Close would not run anyway.
+			if _, err = logging.SetLogFile(globalOptions.LogFile); err != nil {
+				return err
+			}
+		}
 		address := globalOptions.Address
 		if strings.Contains(address, "://") && !strings.HasPrefix(address, "unix://") {
 			return fmt.Errorf("invalid address %q", address)
@@ -248,12 +265,12 @@ Config file ($NERDCTL_TOML): %s
 		}
 
 		// Since we store containers' stateful information on the filesystem per namespace, we need namespaces to be
-		// valid, safe path segments. This is enforced by store.ValidatePathComponent.
+		// valid, safe path segments.
 		// Note that the container runtime will further enforce additional restrictions on namespace names
 		// (containerd treats namespaces as valid identifiers - eg: alphanumericals + dash, starting with a letter)
 		// See https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#path-segment-names for
 		// considerations about path segments identifiers.
-		if err = store.ValidatePathComponent(globalOptions.Namespace); err != nil {
+		if err = store.IsFilesystemSafe(globalOptions.Namespace); err != nil {
 			return err
 		}
 		if appNeedsRootlessParentMain(cmd, args) {
@@ -284,9 +301,11 @@ Config file ($NERDCTL_TOML): %s
 		container.PauseCommand(),
 		container.UnpauseCommand(),
 		container.CommitCommand(),
+		container.ExportCommand(),
 		container.WaitCommand(),
 		container.RenameCommand(),
 		container.AttachCommand(),
+		container.HealthCheckCommand(),
 		// #endregion
 
 		// Build
@@ -298,9 +317,11 @@ Config file ($NERDCTL_TOML): %s
 		image.PushCommand(),
 		image.LoadCommand(),
 		image.SaveCommand(),
+		image.ImportCommand(),
 		image.TagCommand(),
 		image.RmiCommand(),
 		image.HistoryCommand(),
+		search.Command(),
 		// #endregion
 
 		// #region System
@@ -340,6 +361,12 @@ Config file ($NERDCTL_TOML): %s
 
 		// IPFS
 		ipfs.NewIPFSCommand(),
+
+		// Manifest
+		manifest.Command(),
+
+		// Checkpoint
+		checkpoint.Command(),
 	)
 	addApparmorCommand(rootCmd)
 	container.AddCpCommand(rootCmd)

@@ -28,14 +28,14 @@
 # External dependencies:
 # * newuidmap and newgidmap needs to be installed.
 # * /etc/subuid and /etc/subgid needs to be configured for the current user.
-# * RootlessKit (>= v0.10.0) needs to be installed. RootlessKit >= v2.0.0 is recommended.
-# * Either one of slirp4netns (>= v0.4.0), VPNKit, lxc-user-nic needs to be installed. slirp4netns >= v1.1.7 is recommended.
+# * RootlessKit (>= v0.10.0) needs to be installed. RootlessKit >= v3.0.0 is recommended.
 #
 # Recognized environment variables:
 # * CONTAINERD_ROOTLESS_ROOTLESSKIT_STATE_DIR=DIR: the rootlesskit state dir. Defaults to "$XDG_RUNTIME_DIR/containerd-rootless".
-# * CONTAINERD_ROOTLESS_ROOTLESSKIT_NET=(slirp4netns|vpnkit|lxc-user-nic): the rootlesskit network driver. Defaults to "slirp4netns" if slirp4netns (>= v0.4.0) is installed. Otherwise defaults to "vpnkit".
-# * CONTAINERD_ROOTLESS_ROOTLESSKIT_MTU=NUM: the MTU value for the rootlesskit network driver. Defaults to 65520 for slirp4netns, 1500 for other drivers.
-# * CONTAINERD_ROOTLESS_ROOTLESSKIT_PORT_DRIVER=(builtin|slirp4netns): the rootlesskit port driver. Defaults to "builtin".
+# * CONTAINERD_ROOTLESS_ROOTLESSKIT_NET=(slirp4netns|vpnkit|pasta|gvisor-tap-vsock|lxc-user-nic): the rootlesskit network driver. Defaults to "slirp4netns" if slirp4netns (>= v0.4.0) is installed. Otherwise defaults to "gvisor-tap-vsock".
+# * CONTAINERD_ROOTLESS_ROOTLESSKIT_MTU=NUM: the MTU value for the rootlesskit network driver. Defaults to 65520 or 1500, depending on the network driver.
+# * CONTAINERD_ROOTLESS_ROOTLESSKIT_PORT_DRIVER=(builtin|slirp4netns|pesto|implicit|gvisor-tap-vsock): the rootlesskit port driver. Defaults to "builtin".
+#   The "pesto" port driver (experimental, IPv4 only) requires the "pasta" network driver and passt `2026_05_07.1afd4ed` or later, which provides the "pesto" binary.
 # * CONTAINERD_ROOTLESS_ROOTLESSKIT_SLIRP4NETNS_SANDBOX=(auto|true|false): whether to protect slirp4netns with a dedicated mount namespace. Defaults to "auto".
 # * CONTAINERD_ROOTLESS_ROOTLESSKIT_SLIRP4NETNS_SECCOMP=(auto|true|false): whether to protect slirp4netns with seccomp. Defaults to "auto".
 # * CONTAINERD_ROOTLESS_ROOTLESSKIT_DETACH_NETNS=(auto|true|false): whether to launch rootlesskit with the "detach-netns" mode.
@@ -45,6 +45,11 @@
 #   the host loopback IP address (127.0.0.1) and abstract sockets are exposed to Dockerfile's "RUN" instructions during `nerdctl build` (not `nerdctl run`).
 #   The drawback is fixed in BuildKit v0.13. Upgrading from a prior version of BuildKit needs removing the old systemd unit:
 #   `containerd-rootless-setuptool.sh uninstall-buildkit && rm -f ~/.config/buildkit/buildkitd.toml`
+# * CONTAINERD_ROOTLESS_ROOTLESSKIT_IPV6=(true|false): whether to enable IPv6 inside the RootlessKit network namespace.
+#   Defaults to "false".
+#   This mainly affects outgoing connections with slirp4netns and pasta network drivers.
+#   It does not affect port forwarding in the built-in port driver.
+#   Note: The gvisor-tap-vsock network driver does not currently support IPv6.
 
 # See also: https://github.com/containerd/nerdctl/blob/main/docs/rootless.md#configuring-rootlesskit
 
@@ -79,6 +84,7 @@ if [ -z "$_CONTAINERD_ROOTLESS_CHILD" ]; then
 	: "${CONTAINERD_ROOTLESS_ROOTLESSKIT_SLIRP4NETNS_SANDBOX:=auto}"
 	: "${CONTAINERD_ROOTLESS_ROOTLESSKIT_SLIRP4NETNS_SECCOMP:=auto}"
 	: "${CONTAINERD_ROOTLESS_ROOTLESSKIT_DETACH_NETNS:=auto}"
+	: "${CONTAINERD_ROOTLESS_ROOTLESSKIT_IPV6:=false}"
 	net=$CONTAINERD_ROOTLESS_ROOTLESSKIT_NET
 	mtu=$CONTAINERD_ROOTLESS_ROOTLESSKIT_MTU
 	if [ -z "$net" ]; then
@@ -90,15 +96,17 @@ if [ -z "$_CONTAINERD_ROOTLESS_CHILD" ]; then
 					mtu=65520
 				fi
 			else
-				echo "slirp4netns found but seems older than v0.4.0. Falling back to VPNKit."
+				echo "slirp4netns found but seems older than v0.4.0. Falling back to other drivers."
 			fi
 		fi
 		if [ -z "$net" ]; then
 			if command -v vpnkit >/dev/null 2>&1; then
 				net=vpnkit
 			else
-				echo "Either slirp4netns (>= v0.4.0) or vpnkit needs to be installed"
-				exit 1
+				net=gvisor-tap-vsock
+				if [ -z "$mtu" ]; then
+					mtu=65520
+				fi
 			fi
 		fi
 	fi
@@ -136,6 +144,19 @@ if [ -z "$_CONTAINERD_ROOTLESS_CHILD" ]; then
 		;;
 	esac
 
+	case "$CONTAINERD_ROOTLESS_ROOTLESSKIT_IPV6" in
+	1 | true)
+		CONTAINERD_ROOTLESS_ROOTLESSKIT_FLAGS="--ipv6 $CONTAINERD_ROOTLESS_ROOTLESSKIT_FLAGS"
+		;;
+	0 | false)
+		# NOP
+		;;
+	*)
+		echo "Unknown CONTAINERD_ROOTLESS_ROOTLESSKIT_IPV6 value: $CONTAINERD_ROOTLESS_ROOTLESSKIT_IPV6"
+		exit 1
+		;;
+	esac
+
 	# Re-exec the script via RootlessKit, so as to create unprivileged {user,mount,network} namespaces.
 	#
 	# --copy-up allows removing/creating files in the directories by creating tmpfs and symlinks
@@ -160,7 +181,7 @@ else
 	# Remove the *symlinks* for the existing files in the parent namespace if any,
 	# so that we can create our own files in our mount namespace.
 	# The actual files in the parent namespace are *not removed* by this rm command.
-	rm -f /run/containerd /run/xtables.lock \
+	rm -f /run/containerd /run/nri /run/xtables.lock \
 		/var/lib/containerd /var/lib/cni /etc/containerd
 
 	# Bind-mount /etc/ssl.

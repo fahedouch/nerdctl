@@ -25,6 +25,15 @@ import (
 	"github.com/containerd/containerd/v2/core/images"
 )
 
+func TestParseFiltersLabelValueContainingEquals(t *testing.T) {
+	filters, err := ParseFilters([]string{"label=example.payload=a=b"})
+	assert.NilError(t, err)
+	assert.DeepEqual(t, filters.Labels, map[string]string{"example.payload": "a=b"})
+
+	_, err = ParseFilters([]string{"dangling=true=garbage"})
+	assert.Error(t, err, `invalid filter "dangling=true=garbage"`)
+}
+
 func TestApplyFilters(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -261,6 +270,29 @@ func TestFilterByReference(t *testing.T) {
 			},
 			referencePatterns: []string{"foobar"},
 			expectedImages:    []images.Image{},
+		},
+		{
+			// Dangling refs kept alive by `rmi -f` on a running image are named ":" or, since
+			// #4109, ":<digest>". Neither is a parsable reference, so they must be skipped
+			// rather than erroring out the whole filter. See issues #3852 and #4109.
+			name: "SkipsDanglingRefsWithoutErroring",
+			images: []images.Image{
+				{
+					Name: "foo:latest",
+				},
+				{
+					Name: ":",
+				},
+				{
+					Name: ":sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+				},
+			},
+			referencePatterns: []string{"foo"},
+			expectedImages: []images.Image{
+				{
+					Name: "foo:latest",
+				},
+			},
 		},
 	}
 

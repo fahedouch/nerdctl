@@ -17,6 +17,8 @@
 package container
 
 import (
+	"errors"
+	"fmt"
 	"net"
 
 	"github.com/spf13/cobra"
@@ -24,11 +26,12 @@ import (
 	"github.com/containerd/go-cni"
 
 	"github.com/containerd/nerdctl/v2/pkg/api/types"
+	"github.com/containerd/nerdctl/v2/pkg/dnsutil"
 	"github.com/containerd/nerdctl/v2/pkg/portutil"
 	"github.com/containerd/nerdctl/v2/pkg/strutil"
 )
 
-func loadNetworkFlags(cmd *cobra.Command) (types.NetworkOptions, error) {
+func loadNetworkFlags(cmd *cobra.Command, globalOpts types.GlobalCommandOptions) (types.NetworkOptions, error) {
 	netOpts := types.NetworkOptions{}
 
 	// --net/--network=<net name> ...
@@ -101,33 +104,66 @@ func loadNetworkFlags(cmd *cobra.Command) (types.NetworkOptions, error) {
 	netOpts.Domainname = domainname
 
 	// --dns=<DNS host> ...
-	dnsSlice, err := cmd.Flags().GetStringSlice("dns")
-	if err != nil {
-		return netOpts, err
+	// Use command flags if set, otherwise use global config is set
+	var dnsSlice []string
+	if cmd.Flags().Changed("dns") {
+		var err error
+		dnsSlice, err = cmd.Flags().GetStringSlice("dns")
+		if err != nil {
+			return netOpts, err
+		}
+		if len(dnsSlice) == 0 {
+			return netOpts, errors.New("--dns flag was specified but no DNS server was provided")
+		}
+		for _, dns := range dnsSlice {
+			if _, err := dnsutil.ValidateIPAddress(dns); err != nil {
+				return netOpts, fmt.Errorf("%w with --dns flag", err)
+			}
+		}
+	} else {
+		dnsSlice = globalOpts.DNS
 	}
 	netOpts.DNSServers = strutil.DedupeStrSlice(dnsSlice)
 
 	// --dns-search=<domain name> ...
-	dnsSearchSlice, err := cmd.Flags().GetStringSlice("dns-search")
-	if err != nil {
-		return netOpts, err
+	// Use command flags if set, otherwise use global config is set
+	var dnsSearchSlice []string
+	if cmd.Flags().Changed("dns-search") {
+		var err error
+		dnsSearchSlice, err = cmd.Flags().GetStringSlice("dns-search")
+		if err != nil {
+			return netOpts, err
+		}
+	} else {
+		dnsSearchSlice = globalOpts.DNSSearch
 	}
 	netOpts.DNSSearchDomains = strutil.DedupeStrSlice(dnsSearchSlice)
 
 	// --dns-opt/--dns-option=<resolv.conf line> ...
+	// Use command flags if set, otherwise use global config if set
 	dnsOptions := []string{}
 
-	dnsOptFlags, err := cmd.Flags().GetStringSlice("dns-opt")
-	if err != nil {
-		return netOpts, err
-	}
-	dnsOptions = append(dnsOptions, dnsOptFlags...)
+	// Check if either dns-opt or dns-option flags were set
+	dnsOptChanged := cmd.Flags().Changed("dns-opt")
+	dnsOptionChanged := cmd.Flags().Changed("dns-option")
 
-	dnsOptionFlags, err := cmd.Flags().GetStringSlice("dns-option")
-	if err != nil {
-		return netOpts, err
+	if dnsOptChanged || dnsOptionChanged {
+		// Use command flags
+		dnsOptFlags, err := cmd.Flags().GetStringSlice("dns-opt")
+		if err != nil {
+			return netOpts, err
+		}
+		dnsOptions = append(dnsOptions, dnsOptFlags...)
+
+		dnsOptionFlags, err := cmd.Flags().GetStringSlice("dns-option")
+		if err != nil {
+			return netOpts, err
+		}
+		dnsOptions = append(dnsOptions, dnsOptionFlags...)
+	} else {
+		// Use global config defaults
+		dnsOptions = append(dnsOptions, globalOpts.DNSOpts...)
 	}
-	dnsOptions = append(dnsOptions, dnsOptionFlags...)
 
 	netOpts.DNSResolvConfOptions = strutil.DedupeStrSlice(dnsOptions)
 
@@ -151,6 +187,19 @@ func loadNetworkFlags(cmd *cobra.Command) (types.NetworkOptions, error) {
 		return netOpts, err
 	}
 	portSlice = strutil.DedupeStrSlice(portSlice)
+
+	expose, err := cmd.Flags().GetStringSlice("expose")
+	if err != nil {
+		return netOpts, err
+	}
+	netOpts.ExposedPorts = strutil.DedupeStrSlice(expose)
+
+	publishAll, err := cmd.Flags().GetBool("publish-all")
+	if err != nil {
+		return netOpts, err
+	}
+	netOpts.PublishAll = publishAll
+
 	portMappings := []cni.PortMapping{}
 	for _, p := range portSlice {
 		pm, err := portutil.ParseFlagP(p)
